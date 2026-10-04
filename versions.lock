@@ -1,0 +1,12 @@
+# Pinned upstream artifacts bundled into v2ray-kit.
+# Format: name  version  arch  url  sha256
+# Fill in sha256 from upstream release checksums; scripts/fetch-deps.sh refuses empty hashes.
+#
+# xray      <version>  amd64  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-64.zip        <sha256>
+# xray      <version>  arm64  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-arm64-v8a.zip <sha256>
+# xray      <version>  386    https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-32.zip        <sha256>
+# xray      <version>  armv7  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-arm32-v7a.zip <sha256>
+# v2rayn    <version>  amd64  https://github.com/2dust/v2rayN/releases/download/<version>/v2rayN-linux-64.zip       <sha256>
+# v2rayn    <version>  arm64  https://github.com/2dust/v2rayN/releases/download/<version>/v2rayN-linux-arm64.zip    <sha256>
+# geoip     <version>  all    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/<version>/geoip.dat   <sha256>
+# geosite   <version>  all    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/<version>/geosite.dat <sha256>

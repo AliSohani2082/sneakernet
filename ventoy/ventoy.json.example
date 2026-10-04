@@ -1,0 +1,9 @@
+{
+    "persistence": [
+        {
+            "image": "/ISO/ubuntu-24.04-desktop-amd64.iso",
+            "backend": "/persistence/ubuntu_persistence.dat",
+            "autosel": 1
+        }
+    ]
+}

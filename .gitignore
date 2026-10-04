@@ -1,0 +1,6 @@
+build/
+dist/
+.cache/
+config/servers.txt
+config/servers.age
+*.minisign.key

@@ -1,0 +1,6 @@
+# One share link per line. Lines starting with # are ignored.
+# Copy to servers.txt (gitignored) or encrypt with `make encrypt-servers`.
+# Supported: vless:// vmess:// trojan:// ss:// hysteria2://
+#
+# vless://<uuid>@example.com:443?type=tcp&security=reality&sni=www.example.com&fp=chrome&pbk=<pubkey>&sid=<shortid>&flow=xtls-rprx-vision#my-reality
+# trojan://<password>@example.com:443?type=ws&security=tls&path=%2Fws&sni=example.com#my-trojan-ws
