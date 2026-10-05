@@ -1,8 +1,8 @@
-# PRD — Ventoy Offline V2Ray Kit (`v2ray-kit`)
+# PRD — Sneakernet: offline VPN/proxy kit for Ventoy
 
 | Field | Value |
 |---|---|
-| Status | Draft v0.1 |
+| Status | v0.2 — M1 implemented (see §12 and §16) |
 | Date | 2026-10-04 |
 | Owner | TBD |
 | Scope | Linux (v1); Windows and other VPN cores later |
@@ -11,10 +11,10 @@
 
 ## 1. Overview
 
-`v2ray-kit` is a self-contained, **fully offline** installer that lives on a Ventoy USB stick next to the Linux ISOs. A user who live-boots any major Linux distro from that USB can run one script that:
+Sneakernet is a self-contained, **fully offline** installer that lives on a Ventoy USB stick next to the Linux ISOs. A user who live-boots any major Linux distro from that USB can run one script that:
 
 1. installs **Xray-core**,
-2. optionally installs a **GUI** client (v2rayN) or a **TUI** client (our own `v2kit tui`),
+2. optionally installs a **GUI** client (v2rayN) or a **TUI** client (our own `sneakernet tui`),
 3. writes a preset list of V2Ray/Xray server outbounds,
 4. enables everything as **systemd** services so the machine is online through the proxy right away.
 
@@ -28,7 +28,7 @@ In countries with heavily filtered internet, a newly installed Linux system has 
 
 Ventoy is a boot loader. Its "plugins" are entries in `/ventoy/ventoy.json` (persistence, injection, auto-install, …). **Ventoy does not run code inside the booted OS.** So this product is delivered as:
 
-- a **payload folder** (`/v2ray-kit/`) on the Ventoy exFAT data partition, which every live session can mount, and
+- a **payload folder** (`/sneakernet/`) on the Ventoy exFAT data partition, which every live session can mount, and
 - an optional **`ventoy.json` snippet**, mainly the `persistence` plugin so live-session installs survive reboots.
 
 ---
@@ -39,7 +39,7 @@ Ventoy is a boot loader. Its "plugins" are entries in `/ventoy/ventoy.json` (per
 
 - **G1:** Zero network access is needed at any point of installation.
 - **G2:** One command installs and starts a working proxy on all major Linux distros (Debian/Ubuntu/Mint, Fedora/RHEL family, Arch family, openSUSE).
-- **G3:** The user chooses the UI: **GUI** (v2rayN), **TUI** (`v2kit tui`), or **headless** (Xray only).
+- **G3:** The user chooses the UI: **GUI** (v2rayN), **TUI** (`sneakernet tui`), or **headless** (Xray only).
 - **G4:** The user chooses the target: **current running system** or **installed system on disk**.
 - **G5:** Preset servers ship with the kit, and the proxy works with no manual config.
 - **G6:** The kit picks the correct binaries for CPU architecture, libc, distro, and init system automatically.
@@ -70,9 +70,9 @@ Ventoy is a boot loader. Its "plugins" are entries in `/ventoy/ventoy.json` (per
 - **US-2:** As an end user who just installed Ubuntu from the live USB, I run the installer before rebooting, pick "installed system on disk", and select my new root partition. After reboot, Xray is already running and v2rayN starts on login.
 - **US-3:** As an end user, I can switch between preset servers, see connection status, and restart the service from the TUI.
 - **US-4:** As an end user, if my distro is too old for the GUI, the installer says so and offers the TUI instead of failing.
-- **US-5:** As a kit maintainer, I edit `servers.txt` (share links), run `make bundle`, and copy `dist/v2ray-kit/` to the USB.
+- **US-5:** As a kit maintainer, I edit `servers.txt` (share links), run `make bundle`, and copy `dist/sneakernet/` to the USB.
 - **US-6:** As a kit maintainer, I encrypt the server list with a passphrase so a lost USB doesn't leak credentials.
-- **US-7:** As an end user, I can uninstall everything cleanly with `sh uninstall.sh` or `v2kit uninstall`.
+- **US-7:** As an end user, I can uninstall everything cleanly with `sh uninstall.sh` or `sneakernet uninstall`.
 - **US-8:** As an advanced user, I can run the installer non-interactively: `install.sh --target / --ui tui --yes`.
 
 ---
@@ -82,7 +82,7 @@ Ventoy is a boot loader. Its "plugins" are entries in `/ventoy/ventoy.json` (per
 ```
 Boot Ventoy → select distro ISO → live desktop
   → open terminal
-  → sudo sh /run/media/<user>/Ventoy/v2ray-kit/install.sh
+  → sudo sh /run/media/<user>/Ventoy/sneakernet/install.sh
       1. Verify bundle integrity (SHA256SUMS + signature)
       2. Detect: arch, distro, glibc, init system, desktop environment
       3. Ask target:
@@ -109,9 +109,9 @@ Boot Ventoy → select distro ISO → live desktop
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-1 | `install.sh` is POSIX `sh` (no bash-isms) and runs from an exFAT mount where files are not executable. | P0 |
-| FR-2 | The bootstrap maps `uname -m` → `amd64` / `arm64` / `386` / `armv7`, copies the matching `v2kit` binary to a temporary directory, makes it executable, and runs it. | P0 |
+| FR-2 | The bootstrap maps `uname -m` → `amd64` / `arm64` / `386` / `armv7`, copies the matching `sneakernet` binary to a temporary directory, makes it executable, and runs it. | P0 |
 | FR-3 | The bootstrap re-runs itself with `sudo`/`pkexec` when not root. | P0 |
-| FR-4 | `v2kit` verifies every bundle file against `SHA256SUMS` before installing. It verifies the `minisign` signature when a public key is embedded. | P0 |
+| FR-4 | `sneakernet` verifies every bundle file this CPU needs against `SHA256SUMS` before installing (damaged files for other architectures do not block). A `minisign` signature over `SHA256SUMS` is planned (M3). | P0 (signature: P1) |
 
 ### 6.2 Detection
 
@@ -135,11 +135,11 @@ Boot Ventoy → select distro ISO → live desktop
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-13 | **Xray-core:** install to `/usr/local/bin/xray`, with data files in `/usr/local/share/xray/` (`geoip.dat`, `geosite.dat`, optional region `.dat`) and config in `/usr/local/etc/xray/config.json` (mode 0640, owner `root:xray`). | P0 |
-| FR-14 | **TUI:** install `v2kit` to `/usr/local/bin/v2kit`. `v2kit tui` lists servers, switches the active outbound, shows service status and latency, tails logs, and starts/stops/restarts the service. | P0 |
+| FR-13 | **Xray-core:** install to `/opt/sneakernet/bin/xray`, with data files in `/opt/sneakernet/share/` (`geoip.dat`, `geosite.dat`) and config in `/etc/sneakernet/config.json` (mode 0640, owner `root:sneakernet`). Our own paths and unit name never clash with an existing Xray install (`/usr/local/bin/xray`, `xray.service`). | P0 |
+| FR-14 | **TUI:** install `sneakernet` to `/opt/sneakernet/bin/` with a `/usr/local/bin/sneakernet` link. `sneakernet tui` lists servers, switches the active server or auto mode, tests every server at once, shows service status, tails logs, and starts/stops/restarts the service. | P0 |
 | FR-15 | **GUI (v2rayN):** install the self-contained Linux build to `/opt/v2rayN`, with a `.desktop` launcher and XDG autostart for the target user. Pre-seed v2rayN's config with the server list and point it at the bundled Xray core. | P1 |
 | FR-16 | **GUI preflight:** check glibc, required shared libraries (`ldd` on the v2rayN binary against the target), and the presence of a graphical session. If a check fails, explain why and offer the TUI. | P1 |
-| FR-17 | **Mode exclusivity:** in GUI mode, `xray.service` is installed but **disabled** by default, because v2rayN manages its own core. In TUI/headless mode, `xray.service` is enabled and started. | P0 |
+| FR-17 | **Mode exclusivity:** in GUI mode, `sneakernet-xray.service` is installed but **disabled** by default, because v2rayN manages its own core. In TUI/headless mode, `sneakernet-xray.service` is enabled and started. | P0 |
 
 ### 6.5 Configuration
 
@@ -156,8 +156,8 @@ Boot Ventoy → select distro ISO → live desktop
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-24 | Install `xray.service` (systemd) running as a dedicated `xray` system user, with `Restart=on-failure` and `CAP_NET_BIND_SERVICE`, plus `CAP_NET_ADMIN` only when TUN is enabled. | P0 |
-| FR-25 | Optional system-wide proxy settings: `/etc/environment.d/90-v2kit.conf` (http/https/all/no_proxy); GNOME via `gsettings`; KDE via `kwriteconfig5`/`6`. For a disk target, apply on first login through a one-shot autostart. | P1 |
+| FR-24 | Install `sneakernet-xray.service` (systemd) running as the `sneakernet` system user (created offline with `systemd-sysusers`, also with `--root` for disk targets), with `Restart=on-failure`, `CAP_NET_BIND_SERVICE` only, and systemd sandboxing (`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, …). `CAP_NET_ADMIN` is added only when TUN is enabled. | P0 |
+| FR-25 | Optional system-wide proxy settings: `/etc/environment.d/90-sneakernet.conf` (http/https/all/no_proxy); GNOME via `gsettings`; KDE via `kwriteconfig5`/`6`. For a disk target, apply on first login through a one-shot autostart. | P1 |
 | FR-26 | Optional TUN mode through Xray's native TUN inbound (requires a recent core), with routing so that the whole system goes through the proxy. | P2 |
 | FR-27 | OpenRC/runit fallback service scripts. On an unsupported init system, install the files, print manual-start instructions, and don't fail. | P2 |
 
@@ -165,11 +165,11 @@ Boot Ventoy → select distro ISO → live desktop
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-28 | `v2kit doctor`: checks binaries, config validity, service state, listening ports, DNS, and an outbound probe; prints actionable fixes. | P1 |
-| FR-29 | `v2kit uninstall` / `uninstall.sh`: removes every file listed in the install manifest (`/var/lib/v2kit/manifest.json`), disables services, and reverts proxy settings. | P0 |
+| FR-28 | `sneakernet doctor`: checks binaries, config validity, service state, listening ports, DNS, and an outbound probe; prints actionable fixes. | P1 |
+| FR-29 | `sneakernet uninstall` / `uninstall.sh`: removes every file listed in the install manifest (`/var/lib/sneakernet/manifest.json`), disables services, and reverts proxy settings. | P0 |
 | FR-30 | Re-running the installer is idempotent: it upgrades files in place and preserves the user's chosen server unless `--reset` is given. | P0 |
 | FR-31 | Non-interactive flags: `--target <path>`, `--ui tui\|gui\|none`, `--routing <preset>`, `--sysproxy`, `--tun`, `--user <name>`, `--yes`, `--dry-run`. | P1 |
-| FR-32 | All actions are logged to `/var/log/v2kit-install.log` on the target, plus a copy in the bundle directory when it's writable (for support). | P1 |
+| FR-32 | All actions are logged to `/var/log/sneakernet-install.log` on the target, plus a copy in the bundle directory when it's writable (for support). | P1 |
 
 ---
 
@@ -207,8 +207,8 @@ Boot Ventoy → select distro ISO → live desktop
 ## 9. Security and privacy
 
 - **Credentials on removable media:** the server list contains secrets (UUIDs, passwords, Reality keys). We support encryption with `servers.age`, and `README` tells maintainers to use it.
-- **Supply chain:** pinned upstream versions with upstream SHA256 checksums verified at build time. The bundle is signed with `minisign`, and the public key is embedded in `v2kit`.
-- **Least privilege:** Xray runs as the `xray` user, with systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`). The config is not world-readable.
+- **Supply chain:** pinned upstream versions with upstream SHA256 checksums verified at build time. The bundle is signed with `minisign`, and the public key is embedded in `sneakernet`.
+- **Least privilege:** Xray runs as the `sneakernet` system user, with systemd hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`). The config is not world-readable.
 - **No telemetry.** The connectivity self-test only probes a user-configurable URL.
 - **User risk:** using circumvention tools can be legally risky in some jurisdictions. The README must say so plainly. The product does not hide its own presence. It is a convenience installer, not a stealth tool.
 
@@ -216,7 +216,7 @@ Boot Ventoy → select distro ISO → live desktop
 
 ## 10. Ventoy integration
 
-- **Payload location:** `/<Ventoy data partition>/v2ray-kit/`. The default exFAT works, and NTFS is also supported. All live kernels ≥ 5.7 mount exFAT natively.
+- **Payload location:** `/<Ventoy data partition>/sneakernet/`. The default exFAT works, and NTFS is also supported. All live kernels ≥ 5.7 mount exFAT natively.
 - **exFAT has no Unix permissions:** run as `sh install.sh`. Binaries are copied out before they are executed (FR-1, FR-2).
 - **Persistence (optional):** `ventoy/ventoy.json.example` shows a `persistence` entry so that a live-session install survives reboot, with a backend `.dat` image created by Ventoy's `CreatePersistentImg.sh`.
 - **Merging config:** `ventoy/README.md` explains how to merge the snippet into an existing `ventoy.json` without breaking other plugins.
@@ -226,12 +226,12 @@ Boot Ventoy → select distro ISO → live desktop
 
 ## 11. Build and release process (maintainer)
 
-1. Edit `versions.lock` (Xray, v2rayN, geo data, region rules) when updating.
-2. `scripts/fetch-deps.sh` (needs internet): downloads the pinned artifacts and verifies their upstream checksums into `.cache/`.
-3. `make build`: cross-compiles `v2kit` for linux/{amd64, arm64, 386, armv7}.
-4. Add servers: write `config/servers.txt`, or encrypt it with `make encrypt-servers` to produce `servers.age`.
-5. `make bundle`: assembles `dist/v2ray-kit/`, writes `SHA256SUMS`, and signs it.
-6. Copy `dist/v2ray-kit/` to the root of the Ventoy partition (and optionally merge `ventoy.json`).
+1. Edit `versions.lock` when updating Xray (pinned: v26.9.9; checksums are the GitHub release digests).
+2. `make fetch` (needs internet): downloads the pinned Xray zips into `.cache/deps` and verifies them. `scripts/fetch-deps.sh urls` prints the links for downloading by hand.
+3. `make build`: cross-compiles `sneakernet` for linux/{amd64, arm64, 386, armv7} (static, `CGO_ENABLED=0`).
+4. Add servers: write `config/servers.txt` (gitignored). Encryption (`servers.age`) is planned (FR-23).
+5. `make bundle` (offline): assembles `dist/sneakernet/` and writes `SHA256SUMS`. ~200 MB for all four architectures.
+6. Copy `dist/sneakernet/` to the root of the Ventoy partition (and optionally merge `ventoy.json`).
 7. Offline distribution of updates: hand over a new folder, zip, or USB. No online update channel is planned for v1.
 
 ---
@@ -240,11 +240,11 @@ Boot Ventoy → select distro ISO → live desktop
 
 | Milestone | Scope | Exit criteria |
 |---|---|---|
-| **M0** | Repo scaffold, PRD, architecture doc | This document approved |
-| **M1** | Bootstrap, detection, link parser, config generation, Xray + systemd, TUI, uninstall, running-system target | Offline install passes in VMs: Ubuntu 24.04, Debian 12, Fedora 42, Arch (amd64) |
+| **M0** ✅ | Repo scaffold, PRD, architecture doc | This document approved |
+| **M1** ✅ | Bootstrap, detection, link parser, config generation, Xray + systemd, TUI, uninstall, running-system target | Offline install passes in systemd containers (Debian 13, Fedora 43, Arch) with `--network=none`; live-ISO VM runs pending (needs VT-x) |
 | **M2** | v2rayN GUI + preflight, system proxy (GNOME/KDE), `doctor` | GUI works on Ubuntu 26.04, Fedora 43, Arch; graceful fallback on older systems |
 | **M3** | Disk target (incl. btrfs, LUKS), encrypted server list, TUN mode, OpenRC fallback | US-2 passes on 3 distros; LUKS + btrfs case covered |
-| **M4** | Windows: PowerShell bootstrap, `v2kit.exe`, v2rayN-windows, Windows service via `sc`/WinSW | Offline install on Windows 10/11 |
+| **M4** | Windows: PowerShell bootstrap, `sneakernet.exe`, v2rayN-windows, Windows service via `sc`/WinSW | Offline install on Windows 10/11 |
 | **M5** | Core plugin interface (sing-box, WireGuard, OpenVPN) | A second core implemented behind the same interface |
 
 ---
@@ -258,7 +258,7 @@ Boot Ventoy → select distro ISO → live desktop
 | Preset servers get blocked (DPI changes) | Kit installs but cannot connect | Multiple servers + balancer failover; easy server update; `servers.d/` for local additions |
 | Live session without persistence | Install lost on reboot | Warn clearly; recommend a disk target or Ventoy persistence |
 | Distro-specific quirks (SELinux, AppArmor, immutable distros like Silverblue) | Service fails to start | SELinux context restore (`restorecon`) on Fedora/RHEL; detect immutable systems and install to `/usr/local` (writable) or warn |
-| exFAT automount paths differ by distro | User can't find the script | README covers the common paths; bootstrap prints its own location; `find / -name install.sh -path '*v2ray-kit*'` hint |
+| exFAT automount paths differ by distro | User can't find the script | README covers the common paths; bootstrap prints its own location; `find / -name install.sh -path '*sneakernet*'` hint |
 | Legal exposure for users | Harm to users | Clear disclaimer; no stealth features |
 
 ---
@@ -279,3 +279,28 @@ Boot Ventoy → select distro ISO → live desktop
 3. Should the TUI also handle importing new share links typed or pasted by the user? Proposed: yes, P1.
 4. Should Persian (and other) translations of installer prompts be in M1 or later?
 5. Signing key custody: who holds the minisign private key for official bundles?
+
+---
+
+## 16. Implementation notes (M1)
+
+Facts about the pinned Xray (v26.9.9) that shaped the code, verified against its source (`infra/conf/*.go`) and the binary:
+
+- **Config keys are not validated.** Xray ignores unknown JSON keys, so `xray run -test` does not catch a misspelled field. Golden tests in `internal/xrayconf` pin the field names.
+- **Plaintext VLESS/Trojan to a public address is refused.** Links with no TLS/REALITY and no VLESS encryption are listed as unusable instead of failing at start.
+- **`allowInsecure` was removed.** Links that ask for it are kept with a warning; certificate pinning uses `pcs` (`pinnedPeerCertSha256`) and `vcn`.
+- **REALITY** needs a fingerprint (default `chrome`), a 32-byte public key (`password`, formerly `publicKey`), a hex short id of at most 16 characters, and raw/xhttp/grpc transport. A post-quantum key (`pqv`) must decode to 1952 bytes; truncated ones are dropped with a warning.
+- **Removed transports:** `h2`/`http`/`quic` are reported as unusable. `tcp` is now called `raw`; both are accepted.
+- **Servers refuse private targets by default** (`freedom` blackholes loopback/private IPs behind a proxy inbound). This only matters for the local test server; the client's own `direct` outbound is unaffected, so LAN bypass works.
+- **Service account:** the first design used `DynamicUser` + `LoadCredential`. It works on real systems but not in rootless containers, LXC or similar, where the credentials mount fails. M1 uses a static `sneakernet` user from `systemd-sysusers`, which works everywhere systemd does and with `--root`.
+
+Test layers that exist now:
+
+| Layer | What | Command |
+|---|---|---|
+| Unit | link parsing, config shape, detection, bundle checks, service commands | `go test ./...` |
+| Xray | every link kind passes `xray run -test`; real traffic through a local Xray server (VLESS raw/ws/REALITY+Vision, Trojan, Shadowsocks) | `make dev-xray && go test ./...` |
+| CLI | the real installer driven with typed answers into a temp root, `systemctl --root`, `systemd-analyze verify` | `go test ./cmd/...` |
+| System | `install.sh` from a read-only noexec mount in offline systemd containers; service, user, traffic, switch, uninstall | `test/containers/run.sh` |
+| Live ISO | Ventoy image in QEMU | planned (needs VT-x enabled) |
+

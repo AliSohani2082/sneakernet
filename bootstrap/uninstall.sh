@@ -1,14 +1,21 @@
 #!/bin/sh
-# v2ray-kit uninstaller. Prefers the installed v2kit, falls back to the bundle copy.
+# Remove Sneakernet:   sudo sh uninstall.sh
+# Same as running `sudo sneakernet uninstall` on the installed system.
 set -eu
 
 if [ "$(id -u)" -ne 0 ]; then
     exec sudo sh "$0" "$@"
 fi
 
-if command -v v2kit >/dev/null 2>&1; then
-    exec v2kit uninstall "$@"
-fi
-
-BUNDLE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec sh "$BUNDLE_DIR/install.sh" uninstall-only "$@"
+for bin in /opt/sneakernet/bin/sneakernet "$(command -v sneakernet 2>/dev/null || true)"; do
+    if [ -n "$bin" ] && [ -x "$bin" ]; then
+        # The binary deletes itself; run a copy so that is safe.
+        tmp=$(mktemp -d)
+        trap 'rm -rf "$tmp"' EXIT INT TERM
+        cp "$bin" "$tmp/sneakernet"
+        "$tmp/sneakernet" uninstall "$@"
+        exit $?
+    fi
+done
+echo "Sneakernet does not seem to be installed (no /opt/sneakernet/bin/sneakernet)." >&2
+exit 1

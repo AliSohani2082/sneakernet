@@ -1,0 +1,33 @@
+# Installed by sneakernet. Remove with: sudo sneakernet uninstall
+[Unit]
+Description=Sneakernet Xray proxy client
+Documentation=https://github.com/AliSohani2082/sneakernet
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# A system user from /etc/sysusers.d/sneakernet.conf; the config is
+# root:sneakernet 0640, so only root and this service can read it.
+User=sneakernet
+Group=sneakernet
+Environment=XRAY_LOCATION_ASSET=/opt/sneakernet/share
+ExecStart=/opt/sneakernet/bin/xray run -config /etc/sneakernet/config.json
+Restart=on-failure
+RestartSec=3
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,9 @@
-# Pinned upstream artifacts bundled into v2ray-kit.
-# Format: name  version  arch  url  sha256
-# Fill in sha256 from upstream release checksums; scripts/fetch-deps.sh refuses empty hashes.
+# Pinned upstream artifacts bundled into Sneakernet.
+# scripts/fetch-deps.sh downloads them into .cache/deps and refuses any file
+# whose sha256 differs. Checksums come from the GitHub release asset digests.
 #
-# xray      <version>  amd64  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-64.zip        <sha256>
-# xray      <version>  arm64  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-arm64-v8a.zip <sha256>
-# xray      <version>  386    https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-32.zip        <sha256>
-# xray      <version>  armv7  https://github.com/XTLS/Xray-core/releases/download/<version>/Xray-linux-arm32-v7a.zip <sha256>
-# v2rayn    <version>  amd64  https://github.com/2dust/v2rayN/releases/download/<version>/v2rayN-linux-64.zip       <sha256>
-# v2rayn    <version>  arm64  https://github.com/2dust/v2rayN/releases/download/<version>/v2rayN-linux-arm64.zip    <sha256>
-# geoip     <version>  all    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/<version>/geoip.dat   <sha256>
-# geosite   <version>  all    https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/<version>/geosite.dat <sha256>
+# name  version  arch   file                       sha256
+xray    v26.9.9  amd64  Xray-linux-64.zip          1eb9175d0f0a8f8149c9230a7fc5ae66ce332ed20a53155ce61fe62e3f58b7df
+xray    v26.9.9  arm64  Xray-linux-arm64-v8a.zip   3e38d72dfc5eb65c91df0e5583e9b6676c32232041da47de6ae73946b526d66c
+xray    v26.9.9  386    Xray-linux-32.zip          52a825a06d77f6e2d0d72d8d873b1fd277ae503ac9a2aedb112f4f5db0e347e0
+xray    v26.9.9  armv7  Xray-linux-arm32-v7a.zip   5b2a9e2767c0197f7bd41c2db133f91440e845771e621178e0fd2b8520228e5f

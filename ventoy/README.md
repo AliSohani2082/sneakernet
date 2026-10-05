@@ -1,19 +1,27 @@
 # Ventoy integration
 
-Copy `dist/v2ray-kit/` to the **root of the Ventoy data partition** (the large exFAT one), next to your ISOs:
+Copy `dist/sneakernet/` to the **root of the Ventoy data partition** (the large exFAT one), next to your ISOs:
 
 ```
 Ventoy/
 ├── ISO/...
-├── v2ray-kit/        ← here
+├── sneakernet/       ← here
 └── ventoy/ventoy.json (optional)
 ```
 
 In the live session, open a terminal and run:
 
 ```sh
-sudo sh /run/media/$USER/Ventoy/v2ray-kit/install.sh    # Fedora, Arch, openSUSE
-sudo sh /media/$USER/Ventoy/v2ray-kit/install.sh        # Ubuntu, Debian, Mint
+sudo sh /run/media/$USER/Ventoy/sneakernet/install.sh    # Fedora, Arch, openSUSE
+sudo sh /media/$USER/Ventoy/sneakernet/install.sh        # Ubuntu, Debian, Mint
+```
+
+If the partition is not mounted, mount it yourself:
+
+```sh
+sudo mkdir -p /mnt/ventoy && sudo mount /dev/disk/by-label/Ventoy /mnt/ventoy
+# while an ISO from this stick is running, Ventoy may hold the partition; then use
+sudo mount /dev/mapper/sd?1 /mnt/ventoy
 ```
 
 Always use `sh install.sh`. exFAT has no execute bits, so `./install.sh` will fail.

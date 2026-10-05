@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=v2rayN
-Comment=V2Ray/Xray GUI client (v2ray-kit)
+Comment=V2Ray/Xray GUI client (sneakernet)
 Exec=/opt/v2rayN/v2rayN
 Icon=/opt/v2rayN/v2rayN.png
 Terminal=false
