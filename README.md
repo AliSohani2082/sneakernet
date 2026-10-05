@@ -23,7 +23,7 @@ On a heavily filtered network, a fresh Linux install can't reach the open intern
 |---|---|
 | Xray-core (VLESS, VMess, Trojan, Shadowsocks, Hysteria2, REALITY) | ✅ M1 |
 | v2rayN GUI | 🚧 M2 |
-| Sneakernet TUI (terminal UI) | ✅ M1 |
+| Sneakernet TUI: live search, speed test, add/remove | ✅ M1 |
 | WireGuard (`wireguard-tools`, imported `.conf` files) | 🗓️ planned |
 | OpenVPN | 🗓️ planned |
 | ProtonVPN (through its downloadable WireGuard/OpenVPN configs) | 🗓️ planned |
@@ -62,12 +62,32 @@ Afterwards (the stick can be unplugged):
 
 | Command | What it does |
 |---|---|
-| `sudo sneakernet tui` | Terminal UI: pick a server, **test all servers at once**, restart, logs |
+| `sudo sneakernet tui` | Search menu over your servers: type to filter, test speed, use the fastest, add/remove (see below) |
 | `sneakernet status` | Service state, active server, ports (`--check` tests the connection) |
 | `sudo sneakernet switch 12` / `switch auto` | Use another server, or the fastest working one |
 | `sudo sneakernet test --all` | Which servers work right now, fastest first |
+| `sudo sneakernet add links.txt` / `remove 12` | Add servers (from files or stdin) or remove one |
 | `sudo sneakernet doctor` | Diagnose the installation |
 | `sudo sneakernet uninstall` | Remove everything |
+
+### The search menu (`sudo sneakernet tui`)
+
+Start typing and the list filters live. Matches in the server **name** come first, then matches in other properties (protocol, transport, security, host, SNI, port, path…). Matched letters are highlighted, and small typos still match (`grmny` finds "Germany"). `field:value` narrows to one property: `sec:reality`, `proto:vless`, `port:443`, `host:example.com`, `sni:apple`.
+
+| Key | Action |
+|---|---|
+| type / `esc` | search / clear the search (`esc` again quits) |
+| `↑` `↓` `pgup` `pgdn` | move |
+| `enter` | use the selected server |
+| `^t` | test the speed of every server in the results (one Xray process, all in parallel) |
+| `^b` | use the fastest server in the results (tests them first if needed) |
+| `^a` | auto mode: Xray keeps measuring all servers and uses the fastest |
+| `^n` | add servers: paste links, see a live preview, `^s` to save |
+| `^x` | remove the selected server (asks first) |
+| `^o` | sort by relevance or speed |
+| `^l` `^r` `^s` | logs · restart · start/stop |
+
+With no servers yet, the TUI opens straight into the add screen. Pasting links into the search box opens it too. "Speed" is the time to fetch a small page through each server, the same "real delay" v2rayN shows.
 
 ## Building the stick (maintainer, online machine)
 
@@ -78,7 +98,7 @@ make bundle           # → dist/sneakernet/  (~200 MB, amd64 + arm64 + 386 + ar
 cp -r dist/sneakernet /path/to/Ventoy/
 ```
 
-The server list takes `vless://`, `vmess://`, `trojan://`, `ss://` and `hysteria2://` links, one per line, or a base64 subscription. Links that the pinned Xray cannot use are listed with the reason and skipped. See [ventoy/README.md](ventoy/README.md) for optional persistence setup.
+The server list ends up as `sneakernet/servers.txt` on the stick. It can be edited there directly, even from Windows; it is not covered by the checksums. It takes `vless://`, `vmess://`, `trojan://`, `ss://` and `hysteria2://` links, one per line, or a base64 subscription. Links that the pinned Xray cannot use are listed with the reason and skipped. If the list is missing or empty, the installer asks you to paste links, or to continue and add them later in the TUI. See [ventoy/README.md](ventoy/README.md) for optional persistence setup.
 
 ## Development
 
@@ -101,7 +121,7 @@ user, traffic through the proxy, switching servers and uninstall.
 |---|---|
 | `bootstrap/` | `install.sh`, `uninstall.sh`, `README.txt` shipped at the bundle root |
 | `cmd/sneakernet/` | The CLI: installer, management commands, TUI entry |
-| `internal/` | links, xrayconf, probe, manage, install, service, bundle, detect, target, layout, tui |
+| `internal/` | links, search, xrayconf, probe, manage, install, service, bundle, detect, target, layout, tui |
 | `test/fixtures/` | Dummy servers covering every supported link kind |
 | `test/containers/` | Offline systemd container test |
 | `templates/desktop/` | v2rayN launcher (M2) |

@@ -2,10 +2,12 @@ package tui
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
@@ -18,131 +20,256 @@ import (
 	"github.com/AliSohani2082/sneakernet/internal/xraytest"
 )
 
-// installedRoot lays out the files the TUI needs in a temp root.
-func installedRoot(t *testing.T) *manage.Manager {
+// installedRoot lays out an installation in a temp root with the given
+// server list ("" = no list file at all).
+func installedRoot(t *testing.T, servers string) *manage.Manager {
 	t.Helper()
 	xray, assets := xraytest.Binary(t)
 	tg := target.Dir(t.TempDir())
-	copyFile := func(src, dst string, perm os.FileMode) {
-		data, err := os.ReadFile(src)
-		if err != nil {
-			t.Fatal(err)
-		}
+	write := func(dst string, data []byte, perm os.FileMode) {
 		p := tg.Path(dst)
 		os.MkdirAll(filepath.Dir(p), 0o755)
 		if err := os.WriteFile(p, data, perm); err != nil {
 			t.Fatal(err)
 		}
 	}
+	copyFile := func(src, dst string, perm os.FileMode) {
+		data, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write(dst, data, perm)
+	}
 	copyFile(xray, layout.XrayBin, 0o755)
 	for _, g := range layout.GeoFiles {
 		copyFile(filepath.Join(assets, g), filepath.Join(layout.AssetDir, g), 0o644)
 	}
-	copyFile("../../test/fixtures/servers.txt", layout.ServersFile, 0o600)
-	svc, err := service.For(tg, detect.Systemd) // restarts are no-ops on a non-running root
+	if servers != "" {
+		write(layout.ServersFile, []byte(servers), 0o600)
+	}
+	svc, err := service.For(tg, detect.Systemd) // start/restart are no-ops on a non-running root
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &manage.Manager{T: tg, Svc: svc}
-	if _, err := m.Apply(context.Background(), manage.DefaultState()); err != nil {
+	if err := svc.Install(layout.UnitName, service.XrayUnit()); err != nil {
 		t.Fatal(err)
 	}
-	return m
+	mgr := &manage.Manager{T: tg, Svc: svc}
+	// Use ports nothing listens on, so connection checks after a switch fail
+	// fast instead of reaching a proxy that runs on the test machine.
+	st := manage.DefaultState()
+	st.SocksPort, st.HTTPPort = unusedPort(t), unusedPort(t)
+	if err := mgr.SaveState(st); err != nil {
+		t.Fatal(err)
+	}
+	return mgr
 }
 
-func press(t *testing.T, m *model, k tea.KeyPressMsg) tea.Cmd {
+func unusedPort(t *testing.T) int {
 	t.Helper()
-	_, cmd := m.Update(k)
-	return cmd
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
 }
 
-func key(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Text: string(r)} }
+func fixture(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("../../test/fixtures/servers.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
 
-func TestNavigateSwitchAndFilter(t *testing.T) {
-	mgr := installedRoot(t)
+func newTestModel(t *testing.T, mgr *manage.Manager) *model {
+	t.Helper()
 	m, err := newModel(context.Background(), mgr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
-	if !strings.Contains(ansi.Strip(m.View().Content), "auto (fastest working server)") {
-		t.Fatalf("initial view:\n%s", m.View().Content)
-	}
+	return m
+}
 
-	// Down twice and enter: server #3 becomes active and is saved.
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyDown})
-	cmd := press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.busy != "switching" {
-		t.Fatalf("busy = %q", m.busy)
-	}
-	m.Update(cmd()) // switchedMsg
-	if m.state.Auto || m.state.Index != 3 {
-		t.Fatalf("state after switch: %+v (msg %q)", m.state, m.msg)
-	}
-	if saved, _ := mgr.State(); saved.Index != 3 {
-		t.Errorf("switch not saved: %+v", saved)
-	}
+// do sends a message and runs the resulting commands like the program loop
+// would, feeding back only this package's messages (timers are skipped).
+func do(t *testing.T, m *model, msg tea.Msg) {
+	t.Helper()
+	_, cmd := m.Update(msg)
+	run(t, m, cmd)
+}
 
-	// The unusable plaintext server is refused with its reason.
-	press(t, m, key('G'))
-	m.busy = ""
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if !m.msgErr || !strings.Contains(m.msg, "plaintext") {
-		t.Errorf("unusable server: %q", m.msg)
+func run(t *testing.T, m *model, cmd tea.Cmd) {
+	t.Helper()
+	if cmd == nil {
+		return
 	}
-
-	// Filtering narrows the list; esc clears it.
-	press(t, m, key('/'))
-	for _, r := range "hyst" {
-		press(t, m, key(r))
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	var msg tea.Msg
+	select {
+	case msg = <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("command did not finish")
 	}
-	if len(m.visible) != 1 || m.servers[m.visible[0]].Name != "hysteria2" {
-		t.Errorf("filter: %d visible", len(m.visible))
-	}
-	press(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
-	if len(m.visible) != len(m.servers) {
-		t.Errorf("filter not cleared: %d of %d", len(m.visible), len(m.servers))
-	}
-
-	// "a" goes back to auto.
-	drainSwitch := press(t, m, key('a'))
-	m.Update(drainSwitch())
-	if !m.state.Auto {
-		t.Errorf("auto: %+v", m.state)
-	}
-
-	if !strings.Contains(ansi.Strip(m.View().Content), "enter use") {
-		t.Errorf("help line missing:\n%s", m.View().Content)
-	}
-	if cmd := press(t, m, key('q')); cmd == nil {
-		t.Error("q should quit")
+	switch msg := msg.(type) {
+	case tea.BatchMsg:
+		for _, c := range msg {
+			run(t, m, c)
+		}
+	case switchedMsg, testedMsg, checkMsg, addedMsg, removedMsg, opMsg, logsMsg, statusMsg:
+		_, next := m.Update(msg)
+		run(t, m, next)
 	}
 }
 
-func TestTestAllSortsWorkingFirst(t *testing.T) {
+// typeText types into the focused input. Typing only returns cursor-blink
+// timers, so their commands are not run.
+func typeText(t *testing.T, m *model, s string) {
+	t.Helper()
+	for _, r := range s {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+}
+
+func ctrl(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Mod: tea.ModCtrl} }
+
+func view(m *model) string { return ansi.Strip(m.View().Content) }
+
+func names(m *model) []string {
+	var out []string
+	for _, h := range m.hits {
+		out = append(out, m.servers[h.Pos].Name)
+	}
+	return out
+}
+
+func TestEmptyListAsksForServers(t *testing.T) {
+	for name, list := range map[string]string{"missing": "", "only comments": "# nothing yet\n\n"} {
+		t.Run(name, func(t *testing.T) {
+			mgr := installedRoot(t, list)
+			m := newTestModel(t, mgr)
+			if m.screen != addScreen || !strings.Contains(view(m), "There are no servers yet") {
+				t.Fatalf("want the add screen first:\n%s", view(m))
+			}
+			do(t, m, tea.PasteMsg{Content: fixture(t)})
+			if m.plan == nil || len(m.plan.New) != 13 || !strings.Contains(view(m), "13 new") {
+				t.Fatalf("preview: %+v\n%s", m.plan, view(m))
+			}
+			do(t, m, ctrl('s'))
+			if m.screen != searchScreen || len(m.servers) != 13 {
+				t.Fatalf("after save: screen %d, %d servers, msg %q", m.screen, len(m.servers), m.msg)
+			}
+			if !strings.Contains(m.msg, "added 13") || !strings.Contains(m.msg, "enter: use one") {
+				t.Errorf("msg %q", m.msg)
+			}
+			saved, _, _ := mgr.Servers()
+			if len(saved) != 13 {
+				t.Errorf("servers file has %d servers", len(saved))
+			}
+		})
+	}
+}
+
+func TestLiveSearchRanksNameFirst(t *testing.T) {
+	m := newTestModel(t, installedRoot(t, fixture(t)))
+	if len(m.hits) != 13 {
+		t.Fatalf("all servers before typing: %d", len(m.hits))
+	}
+	typeText(t, m, "tls")
+	got := names(m)
+	// Names containing "tls" first, then servers whose security is tls.
+	nameMatch := map[string]bool{"vless ws tls": true, "vless grpc tls": true,
+		"vless httpupgrade tls": true, "vmess ws tls": true, "trojan tls": true}
+	for i, n := range got {
+		if (i < len(nameMatch)) != nameMatch[n] {
+			t.Errorf("rank %d is %q; name matches should come first: %q", i, n, got)
+		}
+	}
+	// hysteria2 by security, vless raw reality by its xtls-rprx-vision flow.
+	if len(got) != 7 || !strings.Contains(view(m), "·sec") || !strings.Contains(view(m), "·flow") {
+		t.Errorf("property matches missing: %q", got)
+	}
+	if !strings.Contains(view(m), "7 of 13") {
+		t.Errorf("count missing:\n%s", view(m))
+	}
+
+	do(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	if m.query.Value() != "" || len(m.hits) != 13 {
+		t.Errorf("esc should clear the search")
+	}
+	typeText(t, m, "sec:reality")
+	if len(m.hits) != 2 {
+		t.Errorf("qualifier: %q", names(m))
+	}
+}
+
+func TestUseAndRemove(t *testing.T) {
+	mgr := installedRoot(t, fixture(t))
+	m := newTestModel(t, mgr)
+	typeText(t, m, "grpc")
+	do(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.state.Auto || m.state.Name != "vless grpc tls" || !mgr.Configured() {
+		t.Fatalf("after enter: %+v (msg %q)", m.state, m.msg)
+	}
+	if !strings.Contains(view(m), `Using #4 "vless grpc tls"`) {
+		t.Errorf("header:\n%s", view(m))
+	}
+
+	// Removing the active server asks first, then falls back to auto.
+	do(t, m, ctrl('x'))
+	if m.confirm == nil || !strings.Contains(view(m), `Remove #4 "vless grpc tls"`) {
+		t.Fatalf("no confirmation:\n%s", view(m))
+	}
+	do(t, m, tea.KeyPressMsg{Code: 'n', Text: "n"})
+	if len(m.servers) != 13 {
+		t.Fatal("answering n removed the server")
+	}
+	do(t, m, ctrl('x'))
+	do(t, m, tea.KeyPressMsg{Code: 'y', Text: "y"})
+	if len(m.servers) != 12 || !m.state.Auto {
+		t.Fatalf("after remove: %d servers, state %+v, msg %q", len(m.servers), m.state, m.msg)
+	}
+	if saved, err := mgr.State(); err != nil || !saved.Auto {
+		t.Errorf("saved state %+v %v", saved, err)
+	}
+}
+
+func TestTestResultsAndUseFastest(t *testing.T) {
 	bin, assets := xraytest.Binary(t)
 	srv := xraytest.Start(t, bin, assets)
-	mgr := installedRoot(t)
-	// Replace the fixture list with the local server's links plus a dead one.
-	list := strings.Join(append([]string{srv.DeadLink}, srv.Links...), "\n")
-	if err := os.WriteFile(mgr.T.Path(layout.ServersFile), []byte(list), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	m, err := newModel(context.Background(), mgr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	list := strings.Join(append(append([]string{srv.DeadLink}, srv.Links...),
+		strings.Split(strings.TrimSpace(fixture(t)), "\n")...), "\n")
+	mgr := installedRoot(t, list)
+	m := newTestModel(t, mgr)
 	m.probeURL = srv.ProbeURL
-	cmd := press(t, m, key('t'))
-	if m.busy != "testing" || cmd == nil {
-		t.Fatalf("t should start a test, busy=%q", m.busy)
+
+	// ^t tests only what the search shows: the five local servers.
+	typeText(t, m, "local")
+	if len(m.hits) != 5 {
+		t.Fatalf("hits for 'local': %q", names(m))
 	}
-	m.Update(cmd())
-	if m.servers[0].Name == "dead" || m.servers[len(m.servers)-1].Name != "dead" {
-		t.Errorf("dead server should sort last: first=%q last=%q", m.servers[0].Name, m.servers[len(m.servers)-1].Name)
+	do(t, m, ctrl('t'))
+	if len(m.results) != 5 || m.order != bySpeed || !strings.Contains(m.msg, "5 of 5 work") {
+		t.Fatalf("tested %d servers, order %v, msg %q", len(m.results), m.order, m.msg)
 	}
-	if !strings.Contains(m.msg, "5 of 6 servers work") {
-		t.Errorf("msg = %q", m.msg)
+
+	// Widen to every server on 127.0.0.1: the dead one is untested, so ^b
+	// tests the results first, then switches to the fastest.
+	do(t, m, tea.KeyPressMsg{Code: tea.KeyEscape})
+	typeText(t, m, "host:127.0.0.1")
+	if len(m.hits) != 6 {
+		t.Fatalf("hits: %q", names(m))
+	}
+	do(t, m, ctrl('b'))
+	if m.state.Auto || !strings.HasPrefix(m.state.Name, "local ") {
+		t.Fatalf("fastest pick: %+v (msg %q)", m.state, m.msg)
+	}
+	last := m.servers[m.hits[len(m.hits)-1].Pos]
+	if r, ok := m.results[last.Key()]; last.Name != "dead" || !ok || r.OK() {
+		t.Errorf("the dead server should sort last as failed: %q", names(m))
 	}
 }

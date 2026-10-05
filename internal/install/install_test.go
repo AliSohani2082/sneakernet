@@ -29,7 +29,6 @@ func fakeBundle(t *testing.T) *bundle.Bundle {
 		"bin/amd64/xray":       xray,
 		"data/geoip.dat":       filepath.Join(assets, "geoip.dat"),
 		"data/geosite.dat":     filepath.Join(assets, "geosite.dat"),
-		"config/servers.txt":   "../../test/fixtures/servers.txt",
 		"bin/amd64/sneakernet": "", // content does not matter here
 	}
 	var sums strings.Builder
@@ -63,6 +62,15 @@ func fakeBundle(t *testing.T) *bundle.Bundle {
 	return b
 }
 
+func fixture(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("../../test/fixtures/servers.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func mode(t *testing.T, p string) os.FileMode {
 	t.Helper()
 	fi, err := os.Stat(p)
@@ -86,7 +94,7 @@ func TestInstallIntoRootAndUninstall(t *testing.T) {
 	st := manage.DefaultState()
 	st.Auto, st.Index = false, 3 // "vless ws tls" in the fixture
 
-	res, err := Install(context.Background(), Options{Bundle: b, Target: tg, Svc: svc, State: st, Log: t.Logf})
+	res, err := Install(context.Background(), Options{Bundle: b, Servers: fixture(t), Target: tg, Svc: svc, State: st, Log: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +141,7 @@ func TestInstallIntoRootAndUninstall(t *testing.T) {
 	if err != nil || st2.Index != 3 {
 		t.Fatalf("saved state: %+v %v", st2, err)
 	}
-	if _, err := Install(context.Background(), Options{Bundle: b, Target: tg, Svc: svc, State: manage.DefaultState()}); err != nil {
+	if _, err := Install(context.Background(), Options{Bundle: b, Servers: fixture(t), Target: tg, Svc: svc, State: manage.DefaultState()}); err != nil {
 		t.Fatalf("re-install: %v", err)
 	}
 	if st3, _ := mgr.State(); !st3.Auto {
@@ -160,7 +168,7 @@ func TestInstallIntoRootAndUninstall(t *testing.T) {
 func TestInstallWithoutServiceManager(t *testing.T) {
 	b := fakeBundle(t)
 	tg := target.Dir(t.TempDir())
-	res, err := Install(context.Background(), Options{Bundle: b, Target: tg, State: manage.DefaultState()})
+	res, err := Install(context.Background(), Options{Bundle: b, Servers: fixture(t), Target: tg, State: manage.DefaultState()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +186,7 @@ func TestInstallRejectsUnusableServer(t *testing.T) {
 	tg := target.Dir(t.TempDir())
 	st := manage.DefaultState()
 	st.Auto, st.Index = false, 13 // the plaintext VLESS fixture
-	if _, err := Install(context.Background(), Options{Bundle: b, Target: tg, State: st}); err == nil ||
+	if _, err := Install(context.Background(), Options{Bundle: b, Servers: fixture(t), Target: tg, State: st}); err == nil ||
 		!strings.Contains(err.Error(), "plaintext") {
 		t.Fatalf("want plaintext error, got %v", err)
 	}
@@ -198,5 +206,37 @@ func TestUninstallKeepsForeignCommand(t *testing.T) {
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Errorf("foreign %s removed", layout.CommandLink)
+	}
+}
+
+// Without usable servers the install still completes, saves the settings
+// and leaves the service off until servers are added.
+func TestInstallWithoutServers(t *testing.T) {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		t.Skip("no systemctl")
+	}
+	b := fakeBundle(t)
+	tg := target.Dir(t.TempDir())
+	svc, err := service.For(tg, detect.Systemd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Install(context.Background(), Options{Bundle: b, Target: tg, Svc: svc,
+		State: manage.DefaultState(), Servers: []byte("# empty\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.NoServers || res.Enabled || res.Started {
+		t.Errorf("result: %+v", res)
+	}
+	mgr := &manage.Manager{T: tg, Svc: svc}
+	if mgr.Configured() || !mgr.Installed() {
+		t.Errorf("configured=%v installed=%v", mgr.Configured(), mgr.Installed())
+	}
+	if _, err := mgr.State(); err != nil {
+		t.Errorf("state not saved: %v", err)
+	}
+	if _, err := os.Lstat(tg.Path("/etc/systemd/system/multi-user.target.wants/" + layout.UnitName)); !os.IsNotExist(err) {
+		t.Error("service enabled without servers")
 	}
 }

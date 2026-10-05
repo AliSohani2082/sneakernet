@@ -9,6 +9,7 @@ package links
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -74,6 +75,13 @@ type Security struct {
 	ShortID          string
 	SpiderX          string
 	MLDSA65Verify    string
+}
+
+// Key identifies a server by its link. Unlike Index it survives adding and
+// removing other servers.
+func (s *Server) Key() string {
+	h := sha256.Sum256([]byte(s.Raw))
+	return hex.EncodeToString(h[:6])
 }
 
 // Usable reports whether the server can be put into an Xray config.

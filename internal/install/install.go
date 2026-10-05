@@ -15,6 +15,7 @@ import (
 	"github.com/AliSohani2082/sneakernet/internal/bundle"
 	"github.com/AliSohani2082/sneakernet/internal/fsutil"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
+	"github.com/AliSohani2082/sneakernet/internal/links"
 	"github.com/AliSohani2082/sneakernet/internal/manage"
 	"github.com/AliSohani2082/sneakernet/internal/service"
 	"github.com/AliSohani2082/sneakernet/internal/target"
@@ -28,6 +29,10 @@ type Options struct {
 	// are still installed and the user is told how to start Xray.
 	Svc   service.Manager
 	State manage.State
+	// Servers is the server list to install: the stick's servers.txt plus
+	// any links the user pasted. It may be empty; then the service is set up
+	// but stays off until servers are added (sneakernet tui).
+	Servers []byte
 	// Log receives progress lines.
 	Log func(format string, a ...any)
 }
@@ -44,11 +49,12 @@ type Manifest struct {
 
 // Result of an install.
 type Result struct {
-	State    manage.State
-	Started  bool   // the service is running now
-	Enabled  bool   // the service starts at boot
-	Manual   string // how to start Xray when there is no service manager
-	Manifest Manifest
+	State     manage.State
+	Started   bool   // the service is running now
+	Enabled   bool   // the service starts at boot
+	NoServers bool   // nothing usable to connect to yet
+	Manual    string // how to start Xray when there is no service manager
+	Manifest  Manifest
 }
 
 // Install copies the payload and activates the chosen server. It is safe to
@@ -79,7 +85,6 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 	}{
 		{o.Bundle.XrayBin(), layout.XrayBin, 0o755},
 		{o.Bundle.SelfBin(), layout.SelfBin, 0o755},
-		{o.Bundle.ServersFile(), layout.ServersFile, 0o600},
 	}
 	for _, g := range layout.GeoFiles {
 		copies = append(copies, struct {
@@ -94,6 +99,11 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		}
 		m.Files = append(m.Files, c.dst)
 	}
+	log("write %s", layout.ServersFile)
+	if err := fsutil.WriteFile(t.Path(layout.ServersFile), o.Servers, 0o600); err != nil {
+		return nil, err
+	}
+	m.Files = append(m.Files, layout.ServersFile)
 
 	if o.Svc != nil {
 		log("create the %s system user", layout.ServiceUser)
@@ -116,14 +126,26 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		m.Links = append(m.Links, layout.CommandLink)
 	}
 
-	log("check the Xray config for %s", o.State.Describe())
 	mgr := &manage.Manager{T: t, Svc: o.Svc}
-	st, err := mgr.Apply(ctx, o.State)
+	res := &Result{State: o.State}
+	servers, _, err := mgr.Servers()
 	if err != nil {
 		return nil, err
 	}
-	m.Files = append(m.Files, layout.ConfigFile, layout.StateFile)
-	res := &Result{State: st}
+	if countUsable(servers) == 0 {
+		log("no usable servers yet: save settings, leave the service off")
+		res.NoServers = true
+		if err := mgr.SaveState(o.State); err != nil {
+			return nil, err
+		}
+	} else {
+		log("check the Xray config for %s", o.State.Describe())
+		if res.State, err = mgr.Apply(ctx, o.State); err != nil {
+			return nil, err
+		}
+		m.Files = append(m.Files, layout.ConfigFile)
+	}
+	m.Files = append(m.Files, layout.StateFile)
 
 	restoreSELinuxLabels(t, log)
 
@@ -135,15 +157,17 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 			return nil, err
 		}
 		m.Units = append(m.Units, layout.UnitName)
-		// On a re-install the service is already running the old config.
-		if err := o.Svc.Enable(layout.UnitName); err != nil {
-			return nil, err
+		if !res.NoServers {
+			// On a re-install the service is already running the old config.
+			if err := o.Svc.Enable(layout.UnitName); err != nil {
+				return nil, err
+			}
+			if err := o.Svc.Restart(layout.UnitName); err != nil {
+				return nil, err
+			}
+			res.Enabled = true
+			res.Started = t.Running
 		}
-		if err := o.Svc.Restart(layout.UnitName); err != nil {
-			return nil, err
-		}
-		res.Enabled = true
-		res.Started = t.Running
 	}
 
 	res.Manifest = m
@@ -155,6 +179,16 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		return nil, err
 	}
 	return res, nil
+}
+
+func countUsable(servers []links.Server) int {
+	n := 0
+	for _, s := range servers {
+		if s.Usable() {
+			n++
+		}
+	}
+	return n
 }
 
 // linkCommand puts `sneakernet` on PATH without clobbering a file we did not create.

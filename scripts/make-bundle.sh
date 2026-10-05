@@ -3,9 +3,9 @@
 #
 #   dist/sneakernet/
 #     install.sh  uninstall.sh  README.txt  VERSION  SHA256SUMS
+#     servers.txt                      the server list (users may edit it)
 #     bin/<arch>/{sneakernet,xray}     amd64 arm64 386 armv7
 #     data/{geoip.dat,geosite.dat}
-#     config/servers.txt
 #     licenses/
 #
 # Runs offline: it needs `make build` output in build/ and the verified
@@ -27,7 +27,7 @@ sh "$ROOT/scripts/fetch-deps.sh" verify >/dev/null
 zip_for() { awk -v a="$1" '$1 == "xray" && $3 == a { print $4 }' "$ROOT/versions.lock"; }
 
 rm -rf "$OUT"
-mkdir -p "$OUT/data" "$OUT/config" "$OUT/licenses"
+mkdir -p "$OUT/data" "$OUT/licenses"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 
@@ -48,17 +48,19 @@ install -m 0644 "$work/$first/LICENSE" "$OUT/licenses/Xray-core-LICENSE"
 install -m 0644 "$ROOT/LICENSE" "$OUT/licenses/sneakernet-LICENSE" 2>/dev/null || true
 
 if [ -f "$SERVERS" ]; then
-    install -m 0644 "$SERVERS" "$OUT/config/servers.txt"
+    install -m 0644 "$SERVERS" "$OUT/servers.txt"
 else
-    echo "warning: $SERVERS not found; shipping the example list" >&2
-    install -m 0644 "$ROOT/config/servers.example.txt" "$OUT/config/servers.txt"
+    # An empty list is fine: the installer and the TUI ask for links.
+    echo "note: $SERVERS not found; shipping the commented example list" >&2
+    install -m 0644 "$ROOT/config/servers.example.txt" "$OUT/servers.txt"
 fi
 
 install -m 0644 "$ROOT/bootstrap/install.sh" "$ROOT/bootstrap/uninstall.sh" "$ROOT/bootstrap/README.txt" "$OUT/"
 echo "$VERSION" > "$OUT/VERSION"
 
-# Checksums of everything the installer reads (paths relative to the bundle).
-(cd "$OUT" && find bin data config -type f | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+# Checksums of the payload (paths relative to the bundle). servers.txt is
+# left out on purpose: users edit it on the stick.
+(cd "$OUT" && find bin data -type f | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
 
 echo "bundle $VERSION -> $OUT"
 du -sh "$OUT"

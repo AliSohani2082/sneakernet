@@ -20,12 +20,17 @@ Everything needed is in this folder. Nothing is downloaded.
      sudo sh /mnt/ventoy/sneakernet/install.sh
 
    It asks a few questions, installs Xray, picks a server from
-   config/servers.txt and starts it as a service.
+   servers.txt (in this folder) and starts it as a service. If that list is
+   empty, it asks you to paste links, or you can add them later in the TUI.
+
+   servers.txt: one share link per line (vless://, vmess://, trojan://,
+   ss://, hysteria2://). You may edit it here, also from Windows.
 
 4. Use the proxy:   SOCKS5 127.0.0.1:10808    HTTP 127.0.0.1:10809
 
    Manage it later (the stick can be unplugged):
-     sudo sneakernet tui        pick servers, test them all, view logs
+     sudo sneakernet tui        search servers as you type, test their speed,
+                                use the fastest, add or remove servers
      sneakernet status          what is running
      sudo sneakernet uninstall  remove everything
 

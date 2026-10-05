@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -136,6 +138,89 @@ func cmdSwitch(ctx context.Context, args []string, u *ui) error {
 	return nil
 }
 
+func cmdAdd(_ context.Context, args []string, u *ui) error {
+	fs := newFlags("add", u)
+	root := rootFlag(fs)
+	fs.Usage = func() {
+		fmt.Fprintln(u.out, "usage: sneakernet add [file...]   (links from the files, or from stdin)")
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	e, err := installed(u, *root)
+	if err != nil {
+		return err
+	}
+	var text []byte
+	if fs.NArg() == 0 {
+		if text, err = io.ReadAll(u.in); err != nil {
+			return err
+		}
+	}
+	for _, f := range fs.Args() {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		text = append(append(text, b...), '\n')
+	}
+	plan, err := e.mgr.AddLinks(string(text))
+	if err != nil {
+		return err
+	}
+	for _, s := range plan.New {
+		note := ""
+		if !s.Usable() {
+			note = u.dim("  " + s.Problem)
+		}
+		u.ok("%s  %s%s", clip(s.Name, 40), u.dim(s.Kind()), note)
+	}
+	for _, le := range plan.Errors {
+		u.warn("skipped %v", le)
+	}
+	u.printf("added %d, %d already in the list\n", len(plan.New), plan.Duplicates)
+	if len(plan.New) > 0 && !e.mgr.Configured() {
+		u.printf("start the proxy with: sudo sneakernet switch auto   (or pick one in sudo sneakernet tui)\n")
+	}
+	return nil
+}
+
+func cmdRemove(ctx context.Context, args []string, u *ui) error {
+	fs := newFlags("remove", u)
+	root := rootFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: sneakernet remove <number>   (see: sneakernet list)")
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
+	if err != nil {
+		return fmt.Errorf("%q is not a server number", fs.Arg(0))
+	}
+	e, err := installed(u, *root)
+	if err != nil {
+		return err
+	}
+	servers, _, err := e.mgr.Servers()
+	if err != nil {
+		return err
+	}
+	for i := range servers {
+		if servers[i].Index != n {
+			continue
+		}
+		removed, st, err := e.mgr.Remove(ctx, servers[i].Key())
+		if err != nil {
+			return err
+		}
+		u.ok("removed #%d %q", n, removed.Name)
+		u.printf("now using %s\n", st.Describe())
+		return nil
+	}
+	return fmt.Errorf("there is no server #%d", n)
+}
+
 func cmdTest(ctx context.Context, args []string, u *ui) error {
 	fs := newFlags("test", u)
 	root := rootFlag(fs)
@@ -173,16 +258,6 @@ func cmdTest(ctx context.Context, args []string, u *ui) error {
 	}
 	printResults(u, servers, results)
 	return nil
-}
-
-func countUsable(servers []links.Server) int {
-	n := 0
-	for _, s := range servers {
-		if s.Usable() {
-			n++
-		}
-	}
-	return n
 }
 
 // printResults lists working servers fastest first, then the failures.
@@ -327,7 +402,7 @@ func cmdConvert(_ context.Context, args []string, u *ui) error {
 		return err
 	}
 	st.Routing, st.Region = *routing, *region
-	cfg, err := xrayconf.Build(list, st.Selection(), st.Options())
+	cfg, err := xrayconf.Build(list, xrayconf.Selection{Auto: st.Auto, Index: st.Index}, st.Options())
 	if err != nil {
 		return err
 	}

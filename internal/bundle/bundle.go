@@ -2,10 +2,13 @@
 //
 // Layout of a bundle directory:
 //
-//	install.sh  uninstall.sh  VERSION  SHA256SUMS
+//	install.sh  uninstall.sh  README.txt  VERSION  SHA256SUMS
+//	servers.txt                       the user's server list (may be missing)
 //	bin/<arch>/{sneakernet,xray}
 //	data/{geoip.dat,geosite.dat}
-//	config/servers.txt
+//
+// SHA256SUMS covers bin/ and data/. servers.txt is meant to be edited on the
+// stick, so it is not checksummed.
 package bundle
 
 import (
@@ -46,7 +49,7 @@ func (b *Bundle) path(p ...string) string { return filepath.Join(append([]string
 func (b *Bundle) XrayBin() string     { return b.path("bin", b.Arch, "xray") }
 func (b *Bundle) SelfBin() string     { return b.path("bin", b.Arch, "sneakernet") }
 func (b *Bundle) AssetDir() string    { return b.path("data") }
-func (b *Bundle) ServersFile() string { return b.path("config", "servers.txt") }
+func (b *Bundle) ServersFile() string { return b.path("servers.txt") }
 
 // Version is the bundle's VERSION file, or "unknown".
 func (b *Bundle) Version() string {

@@ -1,5 +1,8 @@
-// Package tui is the terminal UI: pick a server, test them all, control the
-// service and read its logs.
+// Package tui is the terminal UI. Its main screen is a search menu over the
+// server list: typing filters and ranks servers live (name first, then
+// other properties), and ctrl keys test the results, pick the fastest, add
+// or remove servers and control the service. With an empty list it opens
+// straight into the "add servers" screen.
 package tui
 
 import (
@@ -9,15 +12,19 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/x/ansi"
 
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/links"
 	"github.com/AliSohani2082/sneakernet/internal/manage"
 	"github.com/AliSohani2082/sneakernet/internal/probe"
+	"github.com/AliSohani2082/sneakernet/internal/search"
 	"github.com/AliSohani2082/sneakernet/internal/service"
 )
 
@@ -31,37 +38,74 @@ func Run(ctx context.Context, mgr *manage.Manager) error {
 	return err
 }
 
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	cursorStyle = lipgloss.NewStyle().Reverse(true)
-	keyStyle    = lipgloss.NewStyle().Bold(true)
+type screen int
+
+const (
+	searchScreen screen = iota
+	addScreen
+	logsScreen
 )
+
+type sortMode int
+
+const (
+	byRelevance sortMode = iota
+	bySpeed
+)
+
+func (s sortMode) String() string {
+	if s == bySpeed {
+		return "speed"
+	}
+	return "relevance"
+}
+
+// probeTimeout bounds each server test.
+const probeTimeout = 10 * time.Second
 
 type model struct {
 	ctx      context.Context
 	mgr      *manage.Manager
 	probeURL string // "" = xrayconf.DefaultProbeURL
-	servers  []links.Server
-	state    manage.State
-	status   service.Status
-	results  map[int]probe.Result
 
-	visible   []int // indexes into servers after filtering
-	cursor    int   // position in visible
-	offset    int   // first visible row shown
-	filter    textinput.Model
-	filtering bool
+	servers []links.Server
+	state   manage.State
+	status  service.Status
+	results map[string]probe.Result // by links.Server.Key
 
-	busy     string // what is running now
-	msg      string
-	msgErr   bool
-	showLogs bool
-	logs     string
+	screen screen
+	keys   keyMap
+	help   help.Model
+	spin   spinner.Model
+
+	// search screen
+	query  textinput.Model
+	hits   []search.Hit
+	order  sortMode
+	cursor int
+	offset int
+
+	// add screen
+	add      textarea.Model
+	plan     *manage.AddPlan
+	firstRun bool // the list was empty when the UI started
+
+	// logs screen
+	logs viewport.Model
+
+	busy    string // what is running; actions wait for it
+	msg     string
+	msgErr  bool
+	confirm *confirmation
 
 	width, height int
+}
+
+// confirmation is a pending y/N question shown in the message line. yes
+// builds the command only when confirmed, since starting work marks the UI busy.
+type confirmation struct {
+	prompt string
+	yes    func() tea.Cmd
 }
 
 type (
@@ -71,9 +115,10 @@ type (
 		st  manage.State
 		err error
 	}
-	probeAllMsg struct {
-		results map[int]probe.Result
+	testedMsg struct {
+		results map[string]probe.Result
 		err     error
+		useBest bool
 	}
 	checkMsg struct{ r probe.Result }
 	logsMsg  struct{ text string }
@@ -81,36 +126,112 @@ type (
 		what string
 		err  error
 	}
+	addedMsg struct {
+		plan manage.AddPlan
+		err  error
+	}
+	removedMsg struct {
+		removed links.Server
+		st      manage.State
+		err     error
+	}
 )
 
 func newModel(ctx context.Context, mgr *manage.Manager) (*model, error) {
-	servers, _, err := mgr.Servers()
-	if err != nil {
+	m := &model{
+		ctx: ctx, mgr: mgr, keys: newKeyMap(), help: help.New(),
+		results: map[string]probe.Result{}, width: 100, height: 30,
+		spin: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+	}
+	m.query = textinput.New()
+	m.query.Prompt = "› "
+	m.query.Placeholder = "search: name first, then type, host, sni… e.g. berlin reality  sec:reality  port:443"
+	m.query.Focus()
+
+	m.add = textarea.New()
+	m.add.Placeholder = "vless://…\nvmess://…\ntrojan://…"
+	m.add.ShowLineNumbers = false
+	m.add.CharLimit, m.add.MaxHeight, m.add.MaxWidth = 0, 0, 0 // REALITY links are ~3000 chars
+
+	m.logs = viewport.New()
+	if err := m.reload(); err != nil {
 		return nil, err
 	}
-	st, err := mgr.State()
-	if err != nil {
-		return nil, err
+	m.state, _ = mgr.State() // a missing state file means defaults
+	if len(m.servers) == 0 {
+		m.firstRun = true
+		m.openAdd()
 	}
-	fi := textinput.New()
-	fi.Prompt = "/ "
-	fi.Placeholder = "filter by name or type"
-	m := &model{ctx: ctx, mgr: mgr, servers: servers, state: st, filter: fi,
-		results: map[int]probe.Result{}, width: 100, height: 30}
-	m.refilter()
-	// Start on the active server.
-	for i, idx := range m.visible {
-		if !st.Auto && m.servers[idx].Index == st.Index {
-			m.cursor = i
-		}
-	}
+	m.resize(m.width, m.height)
 	return m, nil
 }
 
-func (m *model) Init() tea.Cmd { return tea.Batch(m.fetchStatus, tick()) }
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(m.fetchStatus, tick(), textinput.Blink)
+}
 
 func tick() tea.Cmd {
 	return tea.Tick(3*time.Second, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// reload re-reads the server list and refreshes the results.
+func (m *model) reload() error {
+	servers, _, err := m.mgr.Servers()
+	if err != nil {
+		return err
+	}
+	m.servers = servers
+	m.refresh()
+	return nil
+}
+
+// refresh recomputes the search results for the current query and order.
+func (m *model) refresh() {
+	m.hits = search.Search(m.servers, m.query.Value())
+	if m.order == bySpeed {
+		rank := func(h search.Hit) (int, time.Duration) {
+			r, ok := m.results[m.servers[h.Pos].Key()]
+			switch {
+			case ok && r.OK():
+				return 0, r.Latency
+			case !ok && m.servers[h.Pos].Usable():
+				return 1, 0 // not tested yet
+			default:
+				return 2, 0
+			}
+		}
+		sort.SliceStable(m.hits, func(a, b int) bool {
+			ra, la := rank(m.hits[a])
+			rb, lb := rank(m.hits[b])
+			if ra != rb {
+				return ra < rb
+			}
+			return la < lb
+		})
+	}
+	m.clamp()
+}
+
+func (m *model) selected() *links.Server {
+	if m.cursor < 0 || m.cursor >= len(m.hits) {
+		return nil
+	}
+	return &m.servers[m.hits[m.cursor].Pos]
+}
+
+// usableHits are the servers in the current results that Xray can use.
+func (m *model) usableHits() []links.Server {
+	var out []links.Server
+	for _, h := range m.hits {
+		if s := m.servers[h.Pos]; s.Usable() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func (m *model) setMsg(isErr bool, format string, a ...any) {
+	m.msg, m.msgErr = fmt.Sprintf(format, a...), isErr
 }
 
 func (m *model) fetchStatus() tea.Msg {
@@ -124,41 +245,24 @@ func (m *model) fetchStatus() tea.Msg {
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.clampScroll()
+		m.resize(msg.Width, msg.Height)
+		return m, nil
 	case tickMsg:
 		return m, tea.Batch(m.fetchStatus, tick())
 	case statusMsg:
 		m.status = msg.st
+		return m, nil
+	case spinner.TickMsg:
+		if m.busy == "" {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spin, cmd = m.spin.Update(msg)
+		return m, cmd
 	case switchedMsg:
-		m.busy = ""
-		// A failed restart can follow a successful write; show what is saved.
-		if saved, err := m.mgr.State(); err == nil {
-			m.state = saved
-		}
-		if msg.err != nil {
-			m.setMsg(true, "switch failed: %v", msg.err)
-			return m, nil
-		}
-		m.state = msg.st
-		m.setMsg(false, "now using %s — checking the connection…", msg.st.Describe())
-		m.busy = "checking"
-		return m, tea.Batch(m.fetchStatus, m.check(2*time.Second))
-	case probeAllMsg:
-		m.busy = ""
-		if msg.err != nil {
-			m.setMsg(true, "test failed: %v", msg.err)
-			return m, nil
-		}
-		m.results = msg.results
-		ok := 0
-		for _, r := range msg.results {
-			if r.OK() {
-				ok++
-			}
-		}
-		m.setMsg(ok == 0, "%d of %d servers work right now (sorted fastest first)", ok, len(msg.results))
-		m.sortByResults()
+		return m.onSwitched(msg)
+	case testedMsg:
+		return m.onTested(msg)
 	case checkMsg:
 		m.busy = ""
 		if msg.r.OK() {
@@ -166,8 +270,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setMsg(true, "no connection through the proxy: %v", msg.r.Err)
 		}
+		return m, nil
 	case logsMsg:
-		m.logs = msg.text
+		m.logs.SetContent(msg.text)
+		m.logs.GotoBottom()
+		return m, nil
 	case opMsg:
 		m.busy = ""
 		if msg.err != nil {
@@ -176,212 +283,446 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setMsg(false, "%s done", msg.what)
 		}
 		return m, m.fetchStatus
+	case addedMsg:
+		return m.onAdded(msg)
+	case removedMsg:
+		return m.onRemoved(msg)
+	case tea.PasteMsg:
+		// Pasting links into the search box opens the add screen with them.
+		if m.screen == searchScreen && strings.Contains(msg.Content, "://") {
+			cmd := m.openAdd()
+			m.add.InsertString(msg.Content)
+			m.updatePlan()
+			return m, cmd
+		}
 	case tea.KeyPressMsg:
-		return m.key(msg)
+		return m.onKey(msg)
 	}
-	return m, nil
+	return m.forward(msg)
 }
 
-func (m *model) setMsg(isErr bool, format string, a ...any) {
-	m.msg, m.msgErr = fmt.Sprintf(format, a...), isErr
+// forward hands other messages (cursor blink, paste, mouse) to the focused
+// component.
+func (m *model) forward(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch m.screen {
+	case searchScreen:
+		before := m.query.Value()
+		m.query, cmd = m.query.Update(msg)
+		if m.query.Value() != before {
+			m.cursor, m.offset = 0, 0
+			m.refresh()
+		}
+	case addScreen:
+		m.add, cmd = m.add.Update(msg)
+		m.updatePlan()
+	case logsScreen:
+		m.logs, cmd = m.logs.Update(msg)
+	}
+	return m, cmd
 }
 
-func (m *model) key(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	key := k.String()
-	if key == "ctrl+c" {
+func (m *model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(k, m.keys.Quit) {
 		return m, tea.Quit
 	}
-	if m.filtering {
-		switch key {
-		case "enter":
-			m.filtering = false
-			m.filter.Blur()
-			return m, nil
-		case "esc":
-			m.filtering = false
-			m.filter.Blur()
-			m.filter.SetValue("")
-			m.refilter()
-			return m, nil
+	if c := m.confirm; c != nil {
+		m.confirm = nil
+		switch k.String() {
+		case "y", "Y":
+			return m, c.yes()
 		}
-		var cmd tea.Cmd
-		m.filter, cmd = m.filter.Update(k)
-		m.refilter()
-		return m, cmd
-	}
-	if m.showLogs {
-		switch key {
-		case "l", "esc", "q":
-			m.showLogs = false
-		case "r":
-			return m, m.fetchLogs
-		}
+		m.setMsg(false, "cancelled")
 		return m, nil
 	}
+	switch m.screen {
+	case addScreen:
+		return m.addKey(k)
+	case logsScreen:
+		return m.logsKey(k)
+	}
+	return m.searchKey(k)
+}
 
-	switch key {
-	case "q":
-		return m, tea.Quit
-	case "up", "k":
+func (m *model) searchKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(k, m.keys.Up):
 		m.move(-1)
-	case "down", "j":
+		return m, nil
+	case key.Matches(k, m.keys.Down):
 		m.move(1)
-	case "pgup":
+		return m, nil
+	case key.Matches(k, m.keys.PageUp):
 		m.move(-m.listHeight())
-	case "pgdown":
+		return m, nil
+	case key.Matches(k, m.keys.PageDown):
 		m.move(m.listHeight())
-	case "home", "g":
-		m.move(-len(m.visible))
-	case "end", "G":
-		m.move(len(m.visible))
-	case "/":
-		m.filtering = true
-		return m, m.filter.Focus()
-	case "l":
-		m.showLogs = true
-		return m, m.fetchLogs
-	}
-	if m.busy != "" {
-		switch key {
-		case "enter", "a", "t", "c", "r", "s":
-			m.setMsg(true, "busy %s — wait a moment", m.busy)
+		return m, nil
+	case key.Matches(k, m.keys.Clear):
+		if m.query.Value() == "" {
+			return m, tea.Quit
 		}
+		m.query.SetValue("")
+		m.cursor, m.offset = 0, 0
+		m.refresh()
+		return m, nil
+	case key.Matches(k, m.keys.Add):
+		return m, m.openAdd()
+	case key.Matches(k, m.keys.Logs):
+		m.screen = logsScreen
+		return m, m.fetchLogs
+	case key.Matches(k, m.keys.Sort):
+		m.order = 1 - m.order
+		m.refresh()
+		m.setMsg(false, "sorted by %s", m.order)
 		return m, nil
 	}
-	switch key {
-	case "enter":
-		if len(m.visible) == 0 {
+	if key.Matches(k, m.keys.actions()...) {
+		if m.busy != "" {
+			m.setMsg(true, "busy %s — wait a moment", m.busy)
 			return m, nil
 		}
-		s := m.servers[m.visible[m.cursor]]
+		return m.action(k)
+	}
+	return m.forward(k) // everything else edits the search box
+}
+
+func (m *model) action(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(k, m.keys.Use):
+		s := m.selected()
+		if s == nil {
+			return m, nil
+		}
 		if !s.Usable() {
 			m.setMsg(true, "#%d cannot be used: %s", s.Index, s.Problem)
 			return m, nil
 		}
 		st := m.state
-		st.Auto, st.Index = false, s.Index
+		st.Use(s)
 		return m, m.doSwitch(st)
-	case "a":
+	case key.Matches(k, m.keys.Auto):
 		st := m.state
-		st.Auto, st.Index = true, 0
+		st.UseAuto()
 		return m, m.doSwitch(st)
-	case "t":
-		m.busy = "testing"
-		m.setMsg(false, "testing every server — this takes up to ~15 seconds…")
-		return m, m.probeAll
-	case "c":
-		m.busy = "checking"
-		m.setMsg(false, "checking the connection…")
-		return m, m.check(0)
-	case "r":
-		m.busy = "restarting"
-		return m, m.op("restart", func() error { return m.mgr.Svc.Restart(layout.UnitName) })
-	case "s":
-		if m.status.Active {
-			m.busy = "stopping"
-			return m, m.op("stop", func() error { return m.mgr.Svc.Stop(layout.UnitName) })
+	case key.Matches(k, m.keys.Test):
+		return m, m.testResults(false)
+	case key.Matches(k, m.keys.Best):
+		return m, m.useBest()
+	case key.Matches(k, m.keys.Remove):
+		s := m.selected()
+		if s == nil {
+			return m, nil
 		}
-		m.busy = "starting"
-		return m, m.op("start", func() error { return m.mgr.Svc.Start(layout.UnitName) })
+		srv := *s
+		m.confirm = &confirmation{
+			prompt: fmt.Sprintf("Remove #%d %q from the list? (y/N)", srv.Index, srv.Name),
+			yes:    func() tea.Cmd { return m.doRemove(srv) },
+		}
+		return m, nil
+	case key.Matches(k, m.keys.Restart):
+		return m, m.op("restart", func(svc service.Manager) error { return svc.Restart(layout.UnitName) })
+	case key.Matches(k, m.keys.Power):
+		if m.status.Active {
+			return m, m.op("stop", func(svc service.Manager) error { return svc.Stop(layout.UnitName) })
+		}
+		return m, m.op("start", func(svc service.Manager) error { return svc.Start(layout.UnitName) })
 	}
 	return m, nil
 }
 
-func (m *model) doSwitch(st manage.State) tea.Cmd {
-	m.busy = "switching"
-	m.setMsg(false, "switching to %s…", st.Describe())
-	return func() tea.Msg {
-		st, err := m.mgr.Switch(m.ctx, st)
-		return switchedMsg{st, err}
-	}
+func (m *model) startBusy(what string) tea.Cmd {
+	m.busy = what
+	return m.spin.Tick
 }
 
-func (m *model) probeAll() tea.Msg {
-	t := m.mgr.T
-	r, err := probe.All(m.ctx, t.Path(layout.XrayBin), t.Path(layout.AssetDir), m.servers, m.probeURL, 10*time.Second)
-	return probeAllMsg{r, err}
+func (m *model) doSwitch(st manage.State) tea.Cmd {
+	m.setMsg(false, "switching to %s…", st.Describe())
+	return tea.Batch(m.startBusy("switching"), func() tea.Msg {
+		st, err := m.mgr.Switch(m.ctx, st)
+		return switchedMsg{st, err}
+	})
+}
+
+func (m *model) onSwitched(msg switchedMsg) (tea.Model, tea.Cmd) {
+	m.busy = ""
+	// A failed restart can follow a successful write; show what is saved.
+	if saved, err := m.mgr.State(); err == nil {
+		m.state = saved
+	}
+	if msg.err != nil {
+		m.setMsg(true, "switch failed: %v", msg.err)
+		return m, m.fetchStatus
+	}
+	m.state = msg.st
+	m.setMsg(false, "now using %s — checking the connection…", msg.st.Describe())
+	return m, tea.Batch(m.fetchStatus, m.startBusy("checking"), m.check(2*time.Second))
+}
+
+// testResults tests every usable server in the current results at once.
+func (m *model) testResults(useBest bool) tea.Cmd {
+	cands := m.usableHits()
+	if len(cands) == 0 {
+		m.setMsg(true, "no usable servers in the results")
+		return nil
+	}
+	m.setMsg(false, "testing %d servers (up to %s)…", len(cands), probeTimeout)
+	t, url := m.mgr.T, m.probeURL
+	return tea.Batch(m.startBusy("testing"), func() tea.Msg {
+		byIndex, err := probe.All(m.ctx, t.Path(layout.XrayBin), t.Path(layout.AssetDir), cands, url, probeTimeout)
+		results := make(map[string]probe.Result, len(byIndex))
+		for _, s := range cands {
+			if r, ok := byIndex[s.Index]; ok {
+				results[s.Key()] = r
+			}
+		}
+		return testedMsg{results: results, err: err, useBest: useBest}
+	})
+}
+
+func (m *model) onTested(msg testedMsg) (tea.Model, tea.Cmd) {
+	m.busy = ""
+	if msg.err != nil {
+		m.setMsg(true, "test failed: %v", msg.err)
+		return m, nil
+	}
+	for k, r := range msg.results {
+		m.results[k] = r
+	}
+	m.order = bySpeed
+	m.refresh()
+	m.cursor, m.offset = 0, 0
+	best := m.fastest(msg.results)
+	ok := 0
+	for _, r := range msg.results {
+		if r.OK() {
+			ok++
+		}
+	}
+	if best == nil {
+		m.setMsg(true, "none of the %d tested servers work right now", len(msg.results))
+		return m, nil
+	}
+	m.setMsg(false, "%d of %d work · fastest: %s (%d ms) · sorted by speed",
+		ok, len(msg.results), best.Name, m.results[best.Key()].Latency.Milliseconds())
+	if msg.useBest {
+		st := m.state
+		st.Use(best)
+		return m, m.doSwitch(st)
+	}
+	return m, nil
+}
+
+// useBest switches to the fastest server in the current results, testing
+// them first unless every one already has a result.
+func (m *model) useBest() tea.Cmd {
+	cands := m.usableHits()
+	tested := map[string]probe.Result{}
+	for _, s := range cands {
+		r, ok := m.results[s.Key()]
+		if !ok {
+			return m.testResults(true)
+		}
+		tested[s.Key()] = r
+	}
+	best := m.fastest(tested)
+	if best == nil {
+		if len(cands) == 0 {
+			m.setMsg(true, "no usable servers in the results")
+		} else {
+			m.setMsg(true, "none of the results worked when tested; ^t to test again")
+		}
+		return nil
+	}
+	st := m.state
+	st.Use(best)
+	return m.doSwitch(st)
+}
+
+// fastest is the working server with the lowest latency among results.
+func (m *model) fastest(results map[string]probe.Result) *links.Server {
+	var best *links.Server
+	var bestLat time.Duration
+	for i := range m.servers {
+		s := &m.servers[i]
+		r, ok := results[s.Key()]
+		if ok && r.OK() && (best == nil || r.Latency < bestLat) {
+			best, bestLat = s, r.Latency
+		}
+	}
+	return best
 }
 
 func (m *model) check(delay time.Duration) tea.Cmd {
-	port := m.state.SocksPort
+	port, url := m.state.SocksPort, m.probeURL
 	return func() tea.Msg {
 		time.Sleep(delay)
-		return checkMsg{probe.Through(m.ctx, fmt.Sprintf("127.0.0.1:%d", port), m.probeURL, 15*time.Second)}
+		return checkMsg{probe.Through(m.ctx, fmt.Sprintf("127.0.0.1:%d", port), url, 15*time.Second)}
 	}
 }
 
-func (m *model) op(what string, fn func() error) tea.Cmd {
+func (m *model) op(what string, fn func(service.Manager) error) tea.Cmd {
 	if m.mgr.Svc == nil {
-		m.busy = ""
 		m.setMsg(true, "no supported service manager on this system")
 		return nil
 	}
-	return func() tea.Msg { return opMsg{what, fn()} }
+	return tea.Batch(m.startBusy(what), func() tea.Msg { return opMsg{what, fn(m.mgr.Svc)} })
 }
 
 func (m *model) fetchLogs() tea.Msg {
 	if m.mgr.Svc == nil {
 		return logsMsg{"no service manager: no logs"}
 	}
-	text, err := m.mgr.Svc.Logs(layout.UnitName, 200)
+	text, err := m.mgr.Svc.Logs(layout.UnitName, 300)
 	if err != nil {
 		text += "\n" + err.Error()
 	}
 	return logsMsg{text}
 }
 
-func (m *model) refilter() {
-	q := strings.ToLower(strings.TrimSpace(m.filter.Value()))
-	m.visible = m.visible[:0]
-	for i, s := range m.servers {
-		if q == "" || strings.Contains(strings.ToLower(s.Name+" "+s.Kind()), q) {
-			m.visible = append(m.visible, i)
-		}
-	}
-	m.clampScroll()
+func (m *model) doRemove(s links.Server) tea.Cmd {
+	return tea.Batch(m.startBusy("removing"), func() tea.Msg {
+		removed, st, err := m.mgr.Remove(m.ctx, s.Key())
+		return removedMsg{removed, st, err}
+	})
 }
 
-// sortByResults orders the list: working servers by latency, then the rest.
-func (m *model) sortByResults() {
-	rank := func(i int) (int, time.Duration) {
-		r, ok := m.results[m.servers[i].Index]
-		switch {
-		case ok && r.OK():
-			return 0, r.Latency
-		case m.servers[i].Usable():
-			return 1, 0
-		default:
-			return 2, 0
-		}
+func (m *model) onRemoved(msg removedMsg) (tea.Model, tea.Cmd) {
+	m.busy = ""
+	if err := m.reload(); err != nil {
+		m.setMsg(true, "%v", err)
+		return m, nil
 	}
-	sort.SliceStable(m.servers, func(a, b int) bool {
-		ra, la := rank(a)
-		rb, lb := rank(b)
-		if ra != rb {
-			return ra < rb
-		}
-		return la < lb
-	})
-	m.cursor, m.offset = 0, 0
-	m.refilter()
+	if msg.err != nil {
+		m.setMsg(true, "remove failed: %v", msg.err)
+		return m, nil
+	}
+	delete(m.results, msg.removed.Key())
+	m.state = msg.st
+	if m.mgr.Configured() {
+		m.setMsg(false, "removed %q · using %s", msg.removed.Name, msg.st.Describe())
+	} else {
+		m.setMsg(false, "removed %q · no usable servers left, the proxy is off · ^n to add", msg.removed.Name)
+	}
+	return m, m.fetchStatus
 }
+
+// --- add screen ---
+
+func (m *model) openAdd() tea.Cmd {
+	m.screen = addScreen
+	m.add.Reset()
+	m.plan = nil
+	m.query.Blur()
+	return m.add.Focus()
+}
+
+func (m *model) updatePlan() {
+	if strings.TrimSpace(m.add.Value()) == "" {
+		m.plan = nil
+		return
+	}
+	if plan, err := m.mgr.PlanAdd(m.add.Value()); err == nil {
+		m.plan = &plan
+	}
+}
+
+func (m *model) addKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(k, m.keys.Save):
+		text := m.add.Value()
+		if m.plan == nil || len(m.plan.New) == 0 {
+			m.setMsg(true, "nothing new to add")
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			plan, err := m.mgr.AddLinks(text)
+			return addedMsg{plan, err}
+		}
+	case key.Matches(k, m.keys.Cancel):
+		if len(m.servers) == 0 {
+			return m, tea.Quit // nothing to go back to
+		}
+		m.screen = searchScreen
+		m.add.Blur()
+		m.msg = ""
+		return m, m.query.Focus()
+	}
+	return m.forward(k)
+}
+
+func (m *model) onAdded(msg addedMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.setMsg(true, "could not save: %v", msg.err)
+		return m, nil
+	}
+	if err := m.reload(); err != nil {
+		m.setMsg(true, "%v", err)
+		return m, nil
+	}
+	m.screen = searchScreen
+	m.add.Blur()
+	m.query.SetValue("")
+	m.refresh()
+	// Put the cursor on the first new server.
+	if len(msg.plan.New) > 0 {
+		first := msg.plan.New[0].Raw
+		for i, h := range m.hits {
+			if m.servers[h.Pos].Raw == first {
+				m.cursor = i
+			}
+		}
+		m.clamp()
+	}
+	note := fmt.Sprintf("added %d server(s)", len(msg.plan.New))
+	if msg.plan.Duplicates > 0 {
+		note += fmt.Sprintf(", %d already listed", msg.plan.Duplicates)
+	}
+	if !m.mgr.Configured() {
+		note += " · enter: use one · ^b: test and use the fastest · ^a: auto"
+	}
+	m.setMsg(false, "%s", note)
+	m.firstRun = false
+	return m, m.query.Focus()
+}
+
+// --- logs screen ---
+
+func (m *model) logsKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(k, m.keys.Back):
+		m.screen = searchScreen
+		return m, m.query.Focus()
+	case key.Matches(k, m.keys.Refresh):
+		return m, m.fetchLogs
+	}
+	return m.forward(k)
+}
+
+// --- layout ---
+
+func (m *model) resize(w, h int) {
+	m.width, m.height = w, h
+	m.query.SetWidth(max(w-30, 20))
+	m.add.SetWidth(max(w-2, 20))
+	m.add.SetHeight(max(h-9, 3))
+	m.logs.SetWidth(w)
+	m.logs.SetHeight(max(h-4, 3))
+	m.help.SetWidth(w)
+	m.clamp()
+}
+
+// listHeight is the number of result rows on the search screen.
+func (m *model) listHeight() int { return max(m.height-9, 3) }
 
 func (m *model) move(d int) {
 	m.cursor += d
-	m.clampScroll()
+	m.clamp()
 }
 
-func (m *model) listHeight() int {
-	h := m.height - 8
-	if h < 3 {
-		h = 3
-	}
-	return h
-}
-
-func (m *model) clampScroll() {
-	if m.cursor >= len(m.visible) {
-		m.cursor = len(m.visible) - 1
+func (m *model) clamp() {
+	if m.cursor >= len(m.hits) {
+		m.cursor = len(m.hits) - 1
 	}
 	if m.cursor < 0 {
 		m.cursor = 0
@@ -393,114 +734,7 @@ func (m *model) clampScroll() {
 	if m.cursor >= m.offset+h {
 		m.offset = m.cursor - h + 1
 	}
-}
-
-func (m *model) View() tea.View {
-	var b strings.Builder
-	w := m.width
-	state := errStyle.Render(m.status.State)
-	if m.status.Active {
-		state = okStyle.Render(m.status.State)
+	if m.offset < 0 {
+		m.offset = 0
 	}
-	if m.status.State == "" {
-		state = dimStyle.Render("…")
-	}
-	fmt.Fprintf(&b, "%s  %s  %s\n", titleStyle.Render("Sneakernet"), state,
-		dimStyle.Render(fmt.Sprintf("SOCKS 127.0.0.1:%d · HTTP 127.0.0.1:%d", m.state.SocksPort, m.state.HTTPPort)))
-	routing := m.state.Routing
-	if m.state.Region != "" {
-		routing += " (" + m.state.Region + ")"
-	}
-	fmt.Fprintf(&b, "Using %s · routing %s\n", titleStyle.Render(m.state.Describe()), routing)
-	b.WriteString(dimStyle.Render(strings.Repeat("─", max(w, 10))) + "\n")
-
-	if m.showLogs {
-		lines := strings.Split(strings.TrimRight(m.logs, "\n"), "\n")
-		h := m.height - 6
-		if len(lines) > h && h > 0 {
-			lines = lines[len(lines)-h:]
-		}
-		for _, l := range lines {
-			b.WriteString(ansi.Truncate(l, w, "…") + "\n")
-		}
-		b.WriteString(dimStyle.Render(strings.Repeat("─", max(w, 10))) + "\n")
-		b.WriteString(help("r", "refresh", "l/esc", "back", "ctrl+c", "quit"))
-		return m.view(b.String())
-	}
-
-	nameW := w - 4 - 6 - 24 - 22
-	if nameW < 16 {
-		nameW = 16
-	}
-	h := m.listHeight()
-	for row := 0; row < h; row++ {
-		i := m.offset + row
-		if i >= len(m.visible) {
-			b.WriteString("\n")
-			continue
-		}
-		s := m.servers[m.visible[i]]
-		mark := " "
-		if !m.state.Auto && s.Index == m.state.Index {
-			mark = okStyle.Render("●")
-		}
-		note := ""
-		if r, ok := m.results[s.Index]; ok {
-			if r.OK() {
-				note = okStyle.Render(fmt.Sprintf("%d ms", r.Latency.Milliseconds()))
-			} else {
-				note = errStyle.Render(ansi.Truncate(r.Err.Error(), 22, "…"))
-			}
-		} else if !s.Usable() {
-			note = ansi.Truncate(s.Problem, 22, "…")
-		}
-		line := fmt.Sprintf("%s %4d  %s  %s  %s", mark, s.Index, pad(s.Name, nameW), pad(s.Kind(), 24), note)
-		switch {
-		case i == m.cursor:
-			line = cursorStyle.Render(ansi.Strip(line))
-		case !s.Usable():
-			line = dimStyle.Render(ansi.Strip(line))
-		}
-		b.WriteString(ansi.Truncate(line, w, "") + "\n")
-	}
-	b.WriteString(dimStyle.Render(strings.Repeat("─", max(w, 10))) + "\n")
-
-	switch {
-	case m.filtering || m.filter.Value() != "":
-		b.WriteString(m.filter.View() + dimStyle.Render(fmt.Sprintf("  %d shown", len(m.visible))) + "\n")
-	case m.msg != "":
-		style := okStyle
-		if m.msgErr {
-			style = errStyle
-		}
-		b.WriteString(style.Render(ansi.Truncate(m.msg, w, "…")) + "\n")
-	default:
-		b.WriteString("\n")
-	}
-	b.WriteString(help("enter", "use", "a", "auto", "t", "test all", "c", "check", "r", "restart",
-		"s", "stop/start", "l", "logs", "/", "filter", "q", "quit"))
-	return m.view(b.String())
-}
-
-func (m *model) view(content string) tea.View {
-	v := tea.NewView(content)
-	v.AltScreen = true
-	return v
-}
-
-func help(pairs ...string) string {
-	var parts []string
-	for i := 0; i+1 < len(pairs); i += 2 {
-		parts = append(parts, keyStyle.Render(pairs[i])+" "+dimStyle.Render(pairs[i+1]))
-	}
-	return strings.Join(parts, dimStyle.Render(" · "))
-}
-
-// pad fits s into exactly n terminal cells (emoji flags are two cells wide).
-func pad(s string, n int) string {
-	s = ansi.Truncate(s, n, "…")
-	if w := ansi.StringWidth(s); w < n {
-		s += strings.Repeat(" ", n-w)
-	}
-	return s
 }

@@ -16,16 +16,30 @@ import (
 	"github.com/AliSohani2082/sneakernet/internal/xraytest"
 )
 
-// makeBundle builds a bundle dir around the real Xray build and the fixtures.
+// makeBundle builds a bundle dir around the real Xray build, with the
+// fixture servers as the stick's servers.txt.
 func makeBundle(t *testing.T) string {
+	t.Helper()
+	dir := makeBundleWithout(t)
+	data, err := os.ReadFile("../../test/fixtures/servers.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "servers.txt"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// makeBundleWithout builds a bundle with no servers.txt.
+func makeBundleWithout(t *testing.T) string {
 	t.Helper()
 	xray, assets := xraytest.Binary(t)
 	dir := t.TempDir()
 	src := map[string]string{
-		"bin/amd64/xray":     xray,
-		"data/geoip.dat":     filepath.Join(assets, "geoip.dat"),
-		"data/geosite.dat":   filepath.Join(assets, "geosite.dat"),
-		"config/servers.txt": "../../test/fixtures/servers.txt",
+		"bin/amd64/xray":   xray,
+		"data/geoip.dat":   filepath.Join(assets, "geoip.dat"),
+		"data/geosite.dat": filepath.Join(assets, "geosite.dat"),
 	}
 	var sums strings.Builder
 	add := func(rel string, data []byte) {
@@ -188,5 +202,74 @@ func TestConvert(t *testing.T) {
 	var cfg map[string]any
 	if err := json.Unmarshal([]byte(out), &cfg); err != nil {
 		t.Fatalf("convert output is not JSON: %v\n%s", err, out)
+	}
+}
+
+const (
+	linkA = "vless://a8d31bbb-0d00-4762-b870-8c23e19d0a8c@a.example.com:443?type=ws&security=tls#pasted A"
+	linkB = "trojan://pw@b.example.com:443#pasted B"
+)
+
+func TestCLIEmptyStickListPaste(t *testing.T) {
+	b := makeBundleWithout(t)
+	root := systemdRoot(t)
+	// interface 1 · paste: a junk line, two links, empty line · server 2 · routing 1
+	answers := "1\nnot a link\n" + linkA + "\n" + linkB + "\n\n2\n1\n"
+	out, code := sn(t, answers, "install", "--bundle", b, "--root", root)
+	if code != 0 {
+		t.Fatalf("install (%d):\n%s", code, out)
+	}
+	for _, want := range []string{"no usable servers", "Paste share links now", "not a share link",
+		"pasted A", "pasted B", `#2 "pasted B"`, "will start at boot"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+	list, _ := os.ReadFile(filepath.Join(root, layout.ServersFile))
+	if string(list) != linkA+"\n"+linkB+"\n" {
+		t.Errorf("installed list:\n%s", list)
+	}
+}
+
+func TestCLINoServersThenAddRemove(t *testing.T) {
+	b := makeBundleWithout(t)
+	root := systemdRoot(t)
+	out, code := sn(t, "", "install", "--bundle", b, "--root", root, "--yes")
+	if code != 0 || !strings.Contains(out, "proxy is off until you add servers") {
+		t.Fatalf("install --yes without servers (%d):\n%s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(root, layout.ConfigFile)); !os.IsNotExist(err) {
+		t.Error("config written without servers")
+	}
+	wants := filepath.Join(root, "etc/systemd/system/multi-user.target.wants", layout.UnitName)
+	if _, err := os.Lstat(wants); !os.IsNotExist(err) {
+		t.Error("service enabled without servers")
+	}
+
+	out, code = sn(t, linkA+"\n"+linkB+"\n"+linkA+"\n", "add", "--root", root)
+	if code != 0 || !strings.Contains(out, "added 2, 1 already in the list") || !strings.Contains(out, "switch auto") {
+		t.Fatalf("add (%d):\n%s", code, out)
+	}
+	out, code = sn(t, "", "switch", "--root", root, "auto")
+	if code != 0 {
+		t.Fatalf("switch (%d):\n%s", code, out)
+	}
+	if _, err := os.Lstat(wants); err != nil {
+		t.Errorf("switch should enable the service: %v", err)
+	}
+
+	// Re-installing from the stick keeps servers added after install.
+	out, code = sn(t, "", "install", "--bundle", makeBundle(t), "--root", root, "--yes", "--server", "auto")
+	if code != 0 || !strings.Contains(out, "15 servers in the list") {
+		t.Fatalf("re-install (%d):\n%s", code, out)
+	}
+
+	out, code = sn(t, "", "remove", "--root", root, "1")
+	if code != 0 || !strings.Contains(out, `removed #1 "pasted A"`) {
+		t.Fatalf("remove (%d):\n%s", code, out)
+	}
+	list, _ := os.ReadFile(filepath.Join(root, layout.ServersFile))
+	if strings.Contains(string(list), linkA) || !strings.Contains(string(list), linkB) {
+		t.Errorf("list after remove:\n%s", list)
 	}
 }

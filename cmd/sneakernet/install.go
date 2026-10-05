@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -97,12 +98,23 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 
-	// 4. Servers
-	servers, lineErrs, err := readServers(b.ServersFile())
+	// 4. Servers: the stick's list, merged into what is already installed so
+	// a re-install keeps servers added later in the TUI.
+	data, err := serverListFor(e, b.ServersFile())
 	if err != nil {
 		return err
 	}
+	servers, lineErrs, _ := links.ParseList(bytes.NewReader(data))
 	summarizeServers(u, servers, lineErrs)
+	if countUsable(servers) == 0 {
+		u.warn("no usable servers: %s on the stick is missing or has no working links", "servers.txt")
+		if !*yes {
+			if data, err = pasteLinks(u, data); err != nil {
+				return err
+			}
+			servers, _, _ = links.ParseList(bytes.NewReader(data))
+		}
+	}
 
 	prev, prevErr := e.mgr.State()
 	st := manage.DefaultState()
@@ -125,7 +137,9 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 	if *httpPort != 0 {
 		st.HTTPPort = *httpPort
 	}
-	if err := chooseServer(u, servers, *server, &st); err != nil {
+	if countUsable(servers) == 0 {
+		u.warn("continuing without servers — add them later with: sudo sneakernet tui")
+	} else if err := chooseServer(u, servers, *server, &st); err != nil {
 		return err
 	}
 	if err := chooseRouting(u, *routing, *region, &st); err != nil {
@@ -143,16 +157,21 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 	// 5. Install
 	u.step("Installing")
 	res, err := install.Install(ctx, install.Options{
-		Bundle: b, Target: e.t, Svc: e.mgr.Svc, State: st, Log: u.logf,
+		Bundle: b, Target: e.t, Svc: e.mgr.Svc, State: st, Servers: data, Log: u.logf,
 	})
 	if err != nil {
 		return err
 	}
-	u.ok("installed to %s, config checked by Xray", layout.OptDir)
 	switch {
+	case res.NoServers:
+		u.ok("installed to %s", layout.OptDir)
+		u.warn("the proxy is off until you add servers: sudo sneakernet tui")
+		return nil
 	case res.Started:
+		u.ok("installed to %s, config checked by Xray", layout.OptDir)
 		u.ok("service %s is running and starts at boot", layout.UnitName)
 	case res.Enabled:
+		u.ok("installed to %s, config checked by Xray", layout.OptDir)
 		u.ok("service %s will start at boot", layout.UnitName)
 	default:
 		u.warn("start Xray with:\n      %s", res.Manual)
@@ -200,6 +219,73 @@ func chooseTarget(u *ui, where, root string) (*env, error) {
 	return openEnv(""), nil
 }
 
+// serverListFor returns the server list to install: the installed list (on a
+// re-install) followed by the stick's links that are not in it yet. A missing
+// stick list is fine.
+func serverListFor(e *env, stickList string) ([]byte, error) {
+	stick, err := os.ReadFile(stickList)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	installed, err := os.ReadFile(e.t.Path(layout.ServersFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return stick, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	plan, err := e.mgr.PlanAdd(string(stick))
+	if err != nil {
+		return nil, err
+	}
+	out := bytes.TrimRight(installed, "\n")
+	if len(out) > 0 {
+		out = append(out, '\n')
+	}
+	for _, s := range plan.New {
+		out = append(out, s.Raw+"\n"...)
+	}
+	return out, nil
+}
+
+// pasteLinks lets the user paste share links line by line, ending with an
+// empty line. Pasting several lines at once works too.
+func pasteLinks(u *ui, data []byte) ([]byte, error) {
+	u.printf("\n%s\n", u.bold("Paste share links now"))
+	u.printf("  one per line (vless://, vmess://, trojan://, ss://, hysteria2://);\n")
+	u.printf("  press Enter on an empty line when done — or right away to add them later.\n")
+	for {
+		line, err := u.readLine()
+		if err != nil || line == "" {
+			return data, nil // EOF just ends the list
+		}
+		s, perr := links.Parse(line)
+		switch {
+		case perr != nil:
+			u.warn("not a share link: %v", perr)
+			continue
+		case !s.Usable():
+			u.warn("%s: %s (skipped)", clip(s.Name, 40), s.Problem)
+			continue
+		}
+		u.ok("%s  %s", clip(s.Name, 40), u.dim(s.Kind()))
+		if len(data) > 0 && !bytes.HasSuffix(data, []byte("\n")) {
+			data = append(data, '\n')
+		}
+		data = append(data, s.Raw+"\n"...)
+	}
+}
+
+func countUsable(servers []links.Server) int {
+	n := 0
+	for _, s := range servers {
+		if s.Usable() {
+			n++
+		}
+	}
+	return n
+}
+
 func readServers(path string) ([]links.Server, []links.LineError, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -244,19 +330,19 @@ func chooseServer(u *ui, servers []links.Server, arg string, st *manage.State) e
 	pick := func(a string) (bool, error) {
 		a = strings.ToLower(strings.TrimSpace(a))
 		if a == "auto" || a == "a" {
-			st.Auto, st.Index = true, 0
+			st.UseAuto()
 			return true, nil
 		}
 		n, err := strconv.Atoi(strings.TrimPrefix(a, "#"))
 		if err != nil {
 			return false, fmt.Errorf("%q is not a server number", a)
 		}
-		for _, s := range servers {
-			if s.Index == n {
+		for i := range servers {
+			if s := &servers[i]; s.Index == n {
 				if !s.Usable() {
 					return false, fmt.Errorf("server #%d cannot be used: %s", n, s.Problem)
 				}
-				st.Auto, st.Index, st.Name = false, n, s.Name
+				st.Use(s)
 				return true, nil
 			}
 		}

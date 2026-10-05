@@ -136,7 +136,7 @@ Boot Ventoy → select distro ISO → live desktop
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-13 | **Xray-core:** install to `/opt/sneakernet/bin/xray`, with data files in `/opt/sneakernet/share/` (`geoip.dat`, `geosite.dat`) and config in `/etc/sneakernet/config.json` (mode 0640, owner `root:sneakernet`). Our own paths and unit name never clash with an existing Xray install (`/usr/local/bin/xray`, `xray.service`). | P0 |
-| FR-14 | **TUI:** install `sneakernet` to `/opt/sneakernet/bin/` with a `/usr/local/bin/sneakernet` link. `sneakernet tui` lists servers, switches the active server or auto mode, tests every server at once, shows service status, tails logs, and starts/stops/restarts the service. | P0 |
+| FR-14 | **TUI:** install `sneakernet` to `/opt/sneakernet/bin/` with a `/usr/local/bin/sneakernet` link. `sneakernet tui` is a live search menu over the servers: results update while typing, name matches rank before property matches (protocol, transport, security, host, SNI, port, path), `field:value` qualifiers narrow results. Actions: use the selected server, test the speed of all results, use the fastest result, auto mode, add servers (paste with live preview), remove servers, sort by relevance/speed, logs, restart, start/stop. With a missing or empty list it opens on the add screen. | P0 |
 | FR-15 | **GUI (v2rayN):** install the self-contained Linux build to `/opt/v2rayN`, with a `.desktop` launcher and XDG autostart for the target user. Pre-seed v2rayN's config with the server list and point it at the bundled Xray core. | P1 |
 | FR-16 | **GUI preflight:** check glibc, required shared libraries (`ldd` on the v2rayN binary against the target), and the presence of a graphical session. If a check fails, explain why and offer the TUI. | P1 |
 | FR-17 | **Mode exclusivity:** in GUI mode, `sneakernet-xray.service` is installed but **disabled** by default, because v2rayN manages its own core. In TUI/headless mode, `sneakernet-xray.service` is enabled and started. | P0 |
@@ -146,7 +146,7 @@ Boot Ventoy → select distro ISO → live desktop
 | ID | Requirement | Priority |
 |---|---|---|
 | FR-18 | Parse share links in `servers.txt`: `vless://`, `vmess://`, `trojan://`, `ss://`, `hysteria2://`, including transports (tcp/ws/grpc/xhttp/httpupgrade) and security (tls/reality). Unknown entries are skipped with a warning. | P0 |
-| FR-19 | Also accept raw Xray outbound JSON fragments in `servers.d/*.json`. | P1 |
+| FR-19 | The server list lives at `sneakernet/servers.txt` on the stick, editable by the user (excluded from `SHA256SUMS`, CRLF and BOM tolerated). Missing or empty is allowed: the installer offers to paste links, and servers can be added later (`sneakernet tui`, `sneakernet add`). A re-install merges the stick list into the installed one. | P0 |
 | FR-20 | Generate an Xray config with inbounds (SOCKS 10808 and HTTP 10809 on 127.0.0.1), all outbounds tagged, and a selected default. An optional `balancer` + `observatory` gives automatic failover. | P0 |
 | FR-21 | Routing presets: `global`, `bypass-lan`, `bypass-lan-region` (region list configurable; it uses bundled `.dat` files). | P0 |
 | FR-22 | Validate the generated config with `xray run -test` before enabling the service (host-arch only; skipped with a warning for a foreign-arch disk target). | P0 |

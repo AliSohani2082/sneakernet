@@ -12,7 +12,7 @@ Ventoy USB (exFAT, no exec bits)              Target system
     ├── uninstall.sh                          │     servers.txt   0600 (copied from the stick)
     ├── bin/<arch>/{sneakernet,xray}          │     state.json    0600 (chosen server, routing, ports)
     ├── data/{geoip,geosite}.dat              ├── /etc/sysusers.d/sneakernet.conf → user "sneakernet"
-    ├── config/servers.txt                    ├── /etc/systemd/system/sneakernet-xray.service
+    ├── servers.txt (user-editable)           ├── /etc/systemd/system/sneakernet-xray.service
     ├── SHA256SUMS  VERSION  README.txt       ├── /var/lib/sneakernet/manifest.json
     └── licenses/                             └── /var/log/sneakernet-install.log
 ```
@@ -37,17 +37,18 @@ install is never touched.
 | Package | Responsibility |
 |---|---|
 | `cmd/sneakernet` | CLI: interactive installer and management commands. `main` is a thin wrapper around `run()` so tests can drive the real CLI with typed answers |
-| `internal/links` | Parse `vless/vmess/trojan/ss/hysteria2` links into `Server`. Flags what the pinned Xray rejects (`Problem`) and what was dropped (`Warnings`) |
+| `internal/links` | Parse `vless/vmess/trojan/ss/hysteria2` links into `Server`. Flags what the pinned Xray rejects (`Problem`) and what was dropped (`Warnings`). `Key()` identifies a server across list edits |
+| `internal/search` | Rank servers for a query: name matches first (word start > substring > compact fuzzy via `sahilm/fuzzy`), then properties from a `Fields` registry that also powers `field:value` qualifiers. New filters plug in there |
 | `internal/xrayconf` | Build the Xray config: SOCKS+HTTP inbounds, one server or a `leastPing` balancer + observatory ("auto"), routing presets. `Validate` runs `xray run -test`. `BuildProbe` makes one config with a SOCKS port per server |
 | `internal/probe` | Fetch a 204 URL through a SOCKS proxy; test every server at once with one temporary Xray process |
-| `internal/manage` | The installed state: read the server list and `state.json`, `Apply` (build → validate → write config), `Switch` (+ restart) |
+| `internal/manage` | The installed state: server list (`AddLinks`, `PlanAdd`, `Remove`), `state.json` (the chosen server by key), `Apply` (build → validate → write config), `Switch` (+ enable/restart) |
 | `internal/install` | Copy the bundle into the target, create the service user, enable the service, write the manifest; uninstall |
 | `internal/service` | systemd: install/enable/restart units, offline (`systemctl --root`) for non-running targets; the `sneakernet` user via `systemd-sysusers` |
 | `internal/bundle` | Locate the payload for this CPU and verify `SHA256SUMS` (files for other CPUs are skipped) |
 | `internal/detect` | os-release family, init system, libc, live session, architecture |
 | `internal/target` | The root to install into: the running system (`/`) or a mounted directory |
 | `internal/layout` | Every installed path, in one place |
-| `internal/tui` | Bubble Tea UI over `manage` and `probe` |
+| `internal/tui` | Bubble Tea UI (bubbles textinput, textarea, viewport, spinner, key/help): search screen, add screen with live preview, logs |
 | `internal/fsutil` | Atomic file writes (temp file + rename) |
 | `internal/xraytest` | Test helper: a local Xray server (VLESS raw/ws/REALITY, Trojan, Shadowsocks) and a 204 endpoint |
 
@@ -55,10 +56,10 @@ install is never touched.
 
 1. `install.sh`: escalate to root → map `uname -m` → copy `bin/<arch>/sneakernet` to an executable temp dir → `sneakernet install --bundle <stick dir>`.
 2. Verify `SHA256SUMS` → ask for the target (M1: running system only) → detect distro, init system, live session.
-3. Ask for the interface (M1: TUI), the server (`auto` or a number), and the routing preset (+ country code). A previous install's settings are offered as defaults.
+3. Read the stick's `servers.txt` (merged into the installed list on a re-install). If nothing usable is in it, offer to paste links or continue without servers. Ask for the interface (M1: TUI), the server (`auto` or a number), and the routing preset (+ country code). A previous install's settings are offered as defaults.
 4. Copy binaries, geo data and the server list → create the `sneakernet` user (`systemd-sysusers`) → link `/usr/local/bin/sneakernet`.
-5. `manage.Apply`: build the config, check it with the installed Xray (`run -test`), write config 0640 and state.
-6. Install and enable `sneakernet-xray.service` (start it if the target is running) → write the manifest.
+5. `manage.Apply`: build the config, check it with the installed Xray (`run -test`), write config 0640 and state. Without usable servers only the state is saved.
+6. Install `sneakernet-xray.service`; enable and start it when there is a config (otherwise the first `switch` in the TUI/CLI does) → write the manifest.
 7. Wait for the SOCKS port and fetch a 204 URL through it → print ports, proxy exports and next commands.
 
 Re-running the installer replaces files in place and keeps the settings if

@@ -90,6 +90,17 @@ func (u *ui) ask(question, def string) (string, error) {
 	return s, nil
 }
 
+// readLine reads one line of input without a prompt.
+func (u *ui) readLine() (string, error) {
+	s, err := u.in.ReadString('\n')
+	if err != nil && (err != io.EOF || s == "") {
+		return "", errInputClosed
+	}
+	s = strings.TrimSpace(s)
+	fmt.Fprintf(u.log, "%s\n", s)
+	return s, nil
+}
+
 func (u *ui) confirm(question string, def bool) (bool, error) {
 	d := "y"
 	if !def {

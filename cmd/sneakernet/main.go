@@ -32,7 +32,9 @@ Commands:
   install     install Xray and the preset servers (run from the USB stick)
   tui         terminal UI: switch servers, test them, watch logs
   status      show the service, the active server and the proxy ports
-  list        list the preset servers
+  list        list the servers
+  add         add servers: sneakernet add links.txt  |  ... | sneakernet add
+  remove      remove a server:  sneakernet remove 12
   switch      use another server:  sneakernet switch 12  |  sneakernet switch auto
   test        check the connection (--all tests every server)
   doctor      diagnose an installation
@@ -61,6 +63,8 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) int {
 		"status":    cmdStatus,
 		"list":      cmdList,
 		"switch":    cmdSwitch,
+		"add":       cmdAdd,
+		"remove":    cmdRemove,
 		"test":      cmdTest,
 		"doctor":    cmdDoctor,
 		"uninstall": cmdUninstall,

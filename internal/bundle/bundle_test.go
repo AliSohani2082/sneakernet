@@ -18,7 +18,7 @@ func makeBundle(t *testing.T) string {
 		"bin/amd64/sneakernet": "sn-amd64",
 		"bin/arm64/xray":       "xray-arm64",
 		"data/geoip.dat":       "geoip",
-		"config/servers.txt":   "vless://x@y:1",
+		"data/geosite.dat":     "geosite",
 		"VERSION":              "v0.1.0\n",
 	}
 	var sums strings.Builder
@@ -64,7 +64,7 @@ func TestVerify(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "data/geoip.dat"), []byte("flipped"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(filepath.Join(dir, "config/servers.txt"))
+	os.Remove(filepath.Join(dir, "data/geosite.dat"))
 	var bad *Corrupt
 	if err := b.Verify(); !errors.As(err, &bad) || len(bad.Files) != 2 {
 		t.Fatalf("want 2 corrupt files, got %v", err)
