@@ -240,3 +240,48 @@ func TestInstallWithoutServers(t *testing.T) {
 		t.Error("service enabled without servers")
 	}
 }
+
+func TestPickCommandDir(t *testing.T) {
+	only := func(ok ...string) func(string) bool {
+		return func(d string) bool {
+			for _, o := range ok {
+				if d == o {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	for name, tc := range map[string]struct {
+		path        string
+		preferLocal bool
+		usable      func(string) bool
+		dir         string
+		onPath      bool
+	}{
+		"debian sudo": {"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", true,
+			only(), "/usr/local/bin", true},
+		"nixos": {"/run/wrappers/bin:/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin",
+			false, only("/run/wrappers/bin"), "/run/wrappers/bin", true},
+		// NixOS sudo may still hand over a FHS-style PATH; /usr/local/bin is not on a user's PATH there.
+		"nixos with fhs sudo path": {"/run/wrappers/bin:/usr/local/sbin:/usr/local/bin:/usr/bin", false,
+			only("/run/wrappers/bin", "/usr/local/sbin"), "/run/wrappers/bin", true},
+		"skips package dirs and homes": {"/home/u/.local/bin:/usr/bin:/opt/tools/bin", true,
+			only("/home/u/.local/bin", "/usr/bin", "/opt/tools/bin"), "/opt/tools/bin", true},
+		"nothing usable": {"/run/current-system/sw/bin", false, only(), "/usr/local/bin", false},
+	} {
+		dir, onPath := pickCommandDir(tc.path, tc.preferLocal, tc.usable)
+		if dir != tc.dir || onPath != tc.onPath {
+			t.Errorf("%s: got %s %v, want %s %v", name, dir, onPath, tc.dir, tc.onPath)
+		}
+	}
+}
+
+func TestCommandDirOnDiskTargets(t *testing.T) {
+	if dir, _ := commandDir(target.Dir("/mnt/x"), "nixos"); dir != "" {
+		t.Errorf("nixos disk target: %q", dir)
+	}
+	if dir, onPath := commandDir(target.Dir("/mnt/x"), "debian"); dir != "/usr/local/bin" || !onPath {
+		t.Errorf("debian disk target: %q %v", dir, onPath)
+	}
+}

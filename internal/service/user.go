@@ -17,19 +17,27 @@ u ` + layout.ServiceUser + ` - "Sneakernet Xray client" - -
 `
 
 // EnsureUser creates the service user with systemd-sysusers, which works
-// offline and against another root (--root). It returns the user's group id.
+// offline and against another root (--root). The entry goes to
+// /etc/sysusers.d, or to /run/sysusers.d when /etc/sysusers.d is read-only
+// on the running system (NixOS). It returns the user's group id.
 func EnsureUser(t target.Target, run Runner) (int, error) {
 	if run == nil {
 		run = execRunner
 	}
-	if err := fsutil.WriteFile(t.Path(layout.SysusersFile), []byte(sysusersConf), 0o644); err != nil {
+	conf := layout.SysusersFile
+	err := fsutil.WriteFile(t.Path(conf), []byte(sysusersConf), 0o644)
+	if err != nil && t.Running && ReadOnly(err) {
+		conf = layout.RuntimeSysusersFile
+		err = fsutil.WriteFile(t.Path(conf), []byte(sysusersConf), 0o644)
+	}
+	if err != nil {
 		return 0, err
 	}
 	args := []string{}
 	if !t.Running {
 		args = append(args, "--root="+t.Root)
 	}
-	if _, err := run("systemd-sysusers", append(args, t.Path(layout.SysusersFile))...); err != nil {
+	if _, err := run("systemd-sysusers", append(args, t.Path(conf))...); err != nil {
 		return 0, err
 	}
 	return GroupID(t, layout.ServiceUser)
@@ -49,7 +57,11 @@ func RemoveUser(t target.Target, run Runner) {
 			_ = dropEntry(t.Path(db), layout.ServiceUser)
 		}
 	}
-	_ = os.Remove(t.Path(layout.SysusersFile))
+	for _, conf := range []string{layout.SysusersFile, layout.RuntimeSysusersFile} {
+		if _, err := os.Lstat(t.Path(conf)); err == nil {
+			_ = os.Remove(t.Path(conf))
+		}
+	}
 }
 
 // dropEntry removes the "name:..." line from an account database file.

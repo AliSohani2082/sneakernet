@@ -143,3 +143,87 @@ func TestUnsupportedInit(t *testing.T) {
 		t.Error("openrc: want error")
 	}
 }
+
+// readOnlyDir makes dir unwritable for this (non-root) test process.
+func readOnlyDir(t *testing.T, dir string) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+}
+
+// On NixOS /etc/systemd/system is in the read-only Nix store; the unit then
+// goes to /run/systemd/system for this boot.
+func TestReadOnlyUnitDirFallsBackToRun(t *testing.T) {
+	root := t.TempDir()
+	readOnlyDir(t, filepath.Join(root, layout.UnitDir))
+	rec := &recorder{}
+	s := &Systemd{T: target.Target{Root: root, Running: true}, Run: rec.run}
+	if err := s.Install(layout.UnitName, XrayUnit()); err != nil {
+		t.Fatal(err)
+	}
+	runtime := filepath.Join(root, layout.RuntimeUnitDir, layout.UnitName)
+	if _, err := os.Stat(runtime); err != nil {
+		t.Fatalf("unit not in %s: %v", layout.RuntimeUnitDir, err)
+	}
+	if s.Persistent(layout.UnitName) {
+		t.Error("a unit in /run is not persistent")
+	}
+	if err := s.Enable(layout.UnitName); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Remove(layout.UnitName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runtime); !os.IsNotExist(err) {
+		t.Errorf("runtime unit left behind: %v", err)
+	}
+	want := []string{
+		"systemctl daemon-reload",
+		"systemctl enable --runtime --now " + layout.UnitName,
+		"systemctl disable --runtime --now " + layout.UnitName,
+		"systemctl daemon-reload",
+		"systemctl reset-failed " + layout.UnitName,
+	}
+	if strings.Join(rec.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(rec.calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A read-only unit dir on a disk target is an error: /run of a system that
+// is not running would not survive anyway.
+func TestReadOnlyUnitDirOnDiskTargetFails(t *testing.T) {
+	root := t.TempDir()
+	readOnlyDir(t, filepath.Join(root, layout.UnitDir))
+	s := &Systemd{T: target.Dir(root), Run: (&recorder{}).run}
+	if err := s.Install(layout.UnitName, XrayUnit()); err == nil {
+		t.Error("want an error")
+	}
+}
+
+func TestReadOnlySysusersDirFallsBackToRun(t *testing.T) {
+	root := t.TempDir()
+	readOnlyDir(t, filepath.Join(root, "etc/sysusers.d"))
+	os.WriteFile(filepath.Join(root, "etc/group"), []byte("sneakernet:x:977:\n"), 0o644)
+	rec := &recorder{}
+	tg := target.Target{Root: root, Running: true}
+	gid, err := EnsureUser(tg, rec.run)
+	if err != nil || gid != 977 {
+		t.Fatalf("gid=%d err=%v", gid, err)
+	}
+	conf := filepath.Join(root, layout.RuntimeSysusersFile)
+	if got := strings.Join(rec.calls, "\n"); got != "systemd-sysusers "+conf {
+		t.Errorf("calls: %s", got)
+	}
+	RemoveUser(tg, rec.run)
+	if _, err := os.Stat(conf); !os.IsNotExist(err) {
+		t.Errorf("runtime sysusers entry left behind")
+	}
+}

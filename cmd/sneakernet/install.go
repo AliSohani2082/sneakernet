@@ -165,8 +165,12 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 	switch {
 	case res.NoServers:
 		u.ok("installed to %s", layout.OptDir)
-		u.warn("the proxy is off until you add servers: sudo sneakernet tui")
+		u.warn("the proxy is off until you add servers: sudo %s tui", res.Command)
 		return nil
+	case res.Started && res.BootOnly:
+		u.ok("installed to %s, config checked by Xray", layout.OptDir)
+		u.ok("service %s is running", layout.UnitName)
+		u.warn("%s is read-only here (NixOS?), so the service is set up for this boot only", layout.UnitDir)
 	case res.Started:
 		u.ok("installed to %s, config checked by Xray", layout.OptDir)
 		u.ok("service %s is running and starts at boot", layout.UnitName)
@@ -183,7 +187,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		u.step("Testing the connection")
 		connected = checkConnection(ctx, u, res.State)
 	}
-	printSummary(u, res.State, connected, live)
+	printSummary(u, res.State, res.Command, connected, live)
 	return nil
 }
 
@@ -463,7 +467,7 @@ func checkConnection(ctx context.Context, u *ui, st manage.State) bool {
 	return false
 }
 
-func printSummary(u *ui, st manage.State, connected, live bool) {
+func printSummary(u *ui, st manage.State, command string, connected, live bool) {
 	w := u.out
 	fmt.Fprintln(w)
 	if connected {
@@ -478,8 +482,8 @@ func printSummary(u *ui, st manage.State, connected, live bool) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  Use it in a terminal:")
 	writeProxyExports(w, st)
-	fmt.Fprintln(w, "  Manage it:      sudo sneakernet tui")
-	fmt.Fprintln(w, "                  sneakernet status | switch | test | uninstall")
+	fmt.Fprintf(w, "  Manage it:      sudo %s tui\n", command)
+	fmt.Fprintf(w, "                  %s status | switch | test | uninstall\n", command)
 	if live {
 		fmt.Fprintln(w, "\n  Live session: this is gone after a reboot unless Ventoy persistence is set up.")
 	}
