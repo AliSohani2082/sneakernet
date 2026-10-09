@@ -15,7 +15,7 @@ func TestPastedLinksNeverReachTheLog(t *testing.T) {
 		"trojan://" + pass + "@example.com:443?security=tls&sni=example.com#t2\n" +
 		"vless://garbage-" + pass + "\n\n"
 	var out, logBuf bytes.Buffer
-	u := newUI(strings.NewReader(in), &out)
+	u := newUI(strings.NewReader(in), &out, &out, globals{color: colorAuto})
 	u.log = &logBuf
 	data, err := pasteLinks(u, nil)
 	if err != nil {

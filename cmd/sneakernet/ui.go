@@ -10,34 +10,62 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/term"
+
 	"github.com/AliSohani2082/sneakernet/internal/links"
+	"github.com/AliSohani2082/sneakernet/internal/tui"
 )
 
 // errInputClosed means stdin ended while a question was open.
 var errInputClosed = errors.New("input closed before the question was answered")
 
 // ui writes progress and asks questions on a plain terminal. It works over
-// serial consoles and pipes, so tests and VMs can script it.
+// serial consoles and pipes, so tests and VMs can script it. Results go to
+// out; progress, warnings and errors go to err.
 type ui struct {
 	in    *bufio.Reader
 	out   io.Writer
-	color bool
-	yes   bool // accept every default without asking
-	log   io.Writer
+	err   io.Writer
+	color bool // paint out
+	// errColor is the same for err; the streams can differ (2>/dev/null).
+	errColor bool
+	yes      bool // accept every default without asking
+	log      io.Writer
+
+	g           globals
+	args        []string // the command line after the global flags
+	interactive bool     // questions may be asked
+	inTTY       bool     // stdin is a terminal
+	outTTY      bool     // stdout is a terminal
+	ascii       bool     // console-safe output was asked for or detected
 }
 
-func newUI(in io.Reader, out io.Writer) *ui {
-	u := &ui{in: bufio.NewReader(in), out: out, log: io.Discard}
-	if f, ok := out.(*os.File); ok && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb" {
-		if fi, err := f.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-			u.color = true
-		}
+func newUI(in io.Reader, out, errOut io.Writer, g globals) *ui {
+	u := &ui{in: bufio.NewReader(in), out: out, err: errOut, log: io.Discard, g: g}
+	u.color = colorEnabled(g.color, os.Getenv, isTerminal(out))
+	u.errColor = colorEnabled(g.color, os.Getenv, isTerminal(errOut))
+	u.inTTY, u.outTTY = isTerminal(in), isTerminal(out)
+	// A reader that is not a file is a script feeding answers (tests); a real
+	// stdin that is not a terminal is a pipe or /dev/null, and nobody is there
+	// to answer.
+	u.interactive = !g.noInput
+	if _, isFile := in.(*os.File); isFile && !u.inTTY {
+		u.interactive = false
 	}
+	u.ascii = g.ascii || tui.DetectASCII(os.Getenv)
 	return u
 }
 
-func (u *ui) paint(code, s string) string {
-	if !u.color {
+// isTerminal reports whether w (an io.Reader or io.Writer) is a terminal.
+func isTerminal(w any) bool {
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(f.Fd())
+}
+
+func (u *ui) paint(code, s string) string { return paintIf(u.color, code, s) }
+
+func paintIf(on bool, code, s string) string {
+	if !on {
 		return s
 	}
 	return "\x1b[" + code + "m" + s + "\x1b[0m"
@@ -46,14 +74,24 @@ func (u *ui) paint(code, s string) string {
 func (u *ui) bold(s string) string { return u.paint("1", s) }
 func (u *ui) dim(s string) string  { return u.paint("2", s) }
 
+// printf writes a result (or a prompt) to stdout and the install log.
 func (u *ui) printf(format string, a ...any) {
 	fmt.Fprintf(u.out, format, a...)
 	fmt.Fprintf(u.log, format, a...)
 }
 
+// notef writes a dimmed side note to stderr and the install log.
+func (u *ui) notef(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	fmt.Fprintf(u.err, "%s\n", paintIf(u.errColor, "2", msg))
+	fmt.Fprintf(u.log, "%s\n", msg)
+}
+
+// line writes a status line to stderr: progress is not the result of a
+// command, so it must not end up in a pipe.
 func (u *ui) line(prefix, code, format string, a ...any) {
 	msg := fmt.Sprintf(format, a...)
-	fmt.Fprintf(u.out, "%s %s\n", u.paint(code, prefix), msg)
+	fmt.Fprintf(u.err, "%s %s\n", paintIf(u.errColor, code, prefix), msg)
 	fmt.Fprintf(u.log, "%s %s\n", prefix, msg)
 }
 
@@ -71,6 +109,9 @@ func (u *ui) ask(question, def string) (string, error) {
 	hint := ""
 	if def != "" {
 		hint = " [" + def + "]"
+	}
+	if err := u.needInput(question); err != nil {
+		return "", err
 	}
 	fmt.Fprintf(u.out, "%s%s: ", question, hint)
 	if u.yes {
@@ -90,8 +131,44 @@ func (u *ui) ask(question, def string) (string, error) {
 	return s, nil
 }
 
+// flagFor names the flag that answers a question, so a script that cannot
+// type gets told what to pass. Matched on lower-case substrings, first wins.
+var flagFor = []struct{ match, flag string }{
+	{"interface", "--yes"},
+	{"installed?", "--target /"},
+	{"traffic", "--routing bypass-lan|bypass-region|global"},
+	{"country code", "--region <two-letter code>"},
+	{"keep these settings", "--server and --routing"},
+	{"server", "--server auto|<number>"},
+	{"remove sneakernet", "--yes"},
+}
+
+// needInput fails when a question has to be asked but nobody can answer.
+func (u *ui) needInput(question string) error {
+	if u.yes || u.interactive {
+		return nil
+	}
+	flag := "--yes"
+	q := strings.ToLower(question)
+	for _, f := range flagFor {
+		if strings.Contains(q, f.match) {
+			flag = f.flag
+			break
+		}
+	}
+	why := "stdin is not a terminal"
+	if u.g.noInput {
+		why = "--no-input is set"
+	}
+	return usageErr("cannot ask %q: %s. Pass %s (or --yes to accept the defaults)",
+		strings.TrimSpace(question), why, flag)
+}
+
 // readLine reads one line of input without a prompt. The text is not logged.
 func (u *ui) readLine() (string, error) {
+	if !u.interactive {
+		return "", errInputClosed
+	}
 	s, err := u.in.ReadString('\n')
 	if err != nil && (err != io.EOF || s == "") {
 		return "", errInputClosed
@@ -130,6 +207,9 @@ type option struct {
 
 // choose shows a numbered menu and returns the 0-based choice.
 func (u *ui) choose(title string, opts []option, def int) (int, error) {
+	if err := u.needInput(title); err != nil {
+		return 0, err
+	}
 	u.printf("\n%s\n", u.bold(title))
 	for i, o := range opts {
 		label := fmt.Sprintf("  %d) %s", i+1, o.label)

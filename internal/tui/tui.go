@@ -8,6 +8,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -19,6 +20,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/links"
@@ -28,14 +31,38 @@ import (
 	"github.com/AliSohani2082/sneakernet/internal/service"
 )
 
+// Options tune how the UI looks. The zero value is "unicode, no color
+// override".
+type Options struct {
+	// ASCII forces the console-safe symbol set. It is also chosen when
+	// DetectASCII says the terminal needs it.
+	ASCII bool
+	// NoColor strips colors but keeps bold and faint. The caller decides
+	// (NO_COLOR, --color) so the CLI and the TUI follow one rule.
+	NoColor bool
+	// NoFKeys is set on the bare Linux console, where F1-F5 do not arrive as
+	// F-keys; the help bar then names ^g instead of F1.
+	NoFKeys bool
+}
+
 // Run starts the UI and blocks until the user quits.
-func Run(ctx context.Context, mgr *manage.Manager) error {
-	m, err := newModel(ctx, mgr)
+func Run(ctx context.Context, mgr *manage.Manager, opts Options) error {
+	opts.ASCII = opts.ASCII || DetectASCII(os.Getenv)
+	opts.NoFKeys = opts.NoFKeys || os.Getenv("TERM") == "linux"
+	m, err := newModel(ctx, mgr, opts)
 	if err != nil {
 		return err
 	}
-	_, err = tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	_, err = tea.NewProgram(m, programOptions(ctx, opts)...).Run()
 	return err
+}
+
+func programOptions(ctx context.Context, opts Options) []tea.ProgramOption {
+	po := []tea.ProgramOption{tea.WithContext(ctx)}
+	if opts.NoColor {
+		po = append(po, tea.WithColorProfile(colorprofile.Ascii))
+	}
+	return po
 }
 
 type screen int
@@ -63,6 +90,9 @@ func (s sortMode) String() string {
 // probeTimeout bounds each server test.
 const probeTimeout = 10 * time.Second
 
+// messageTTL is how long a status message stays; errors stay until a key.
+const messageTTL = 5 * time.Second
+
 type model struct {
 	ctx      context.Context
 	mgr      *manage.Manager
@@ -73,10 +103,12 @@ type model struct {
 	status  service.Status
 	results map[string]probe.Result // by links.Server.Key
 
-	screen screen
-	keys   keyMap
-	help   help.Model
-	spin   spinner.Model
+	screen   screen
+	keys     keyMap
+	help     help.Model
+	spin     spinner.Model
+	g        glyphs
+	showHelp bool // the full help replaces the screen
 
 	// search screen
 	query  textinput.Model
@@ -93,10 +125,15 @@ type model struct {
 	// logs screen
 	logs viewport.Model
 
-	busy    string // what is running; actions wait for it
-	msg     string
-	msgErr  bool
-	confirm *confirmation
+	busy       string // what is running; actions wait for it
+	cancel     context.CancelFunc
+	cancelling bool // esc was pressed; waiting for the work to stop
+	msg        string
+	msgErr     bool
+	msgID      int           // changes with every message, so a timer clears only its own
+	msgTTL     time.Duration // 0 = messages stay until replaced
+	confirm    *confirmation
+	why        map[string]string // key -> why that action is unavailable now
 
 	width, height int
 }
@@ -110,6 +147,7 @@ type confirmation struct {
 
 type (
 	tickMsg     struct{}
+	msgClearMsg struct{ id int }
 	statusMsg   struct{ st service.Status }
 	switchedMsg struct {
 		st  manage.State
@@ -137,15 +175,17 @@ type (
 	}
 )
 
-func newModel(ctx context.Context, mgr *manage.Manager) (*model, error) {
+func newModel(ctx context.Context, mgr *manage.Manager, opts Options) (*model, error) {
+	g := pickGlyphs(opts.ASCII)
 	m := &model{
-		ctx: ctx, mgr: mgr, keys: newKeyMap(), help: help.New(),
+		ctx: ctx, mgr: mgr, keys: newKeyMap(g, !opts.NoFKeys), help: newHelp(g), g: g,
 		results: map[string]probe.Result{}, width: 100, height: 30,
-		spin: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		spin:   spinner.New(spinner.WithSpinner(g.spinner)),
+		msgTTL: messageTTL, why: map[string]string{},
 	}
 	m.query = textinput.New()
-	m.query.Prompt = "› "
-	m.query.Placeholder = "search: name first, then type, host, sni… e.g. berlin reality  sec:reality  port:443"
+	m.query.Prompt = g.cursor
+	m.query.Placeholder = g.safe("search: name, type, host… e.g. berlin sec:reality")
 	m.query.Focus()
 
 	m.add = textarea.New()
@@ -163,7 +203,22 @@ func newModel(ctx context.Context, mgr *manage.Manager) (*model, error) {
 		m.openAdd()
 	}
 	m.resize(m.width, m.height)
+	m.syncKeys()
 	return m, nil
+}
+
+// newHelp styles the help bar with ANSI colors only. The bubble's default
+// greys are hex colors that fall back to near-black on a 16-color console.
+func newHelp(g glyphs) help.Model {
+	h := help.New()
+	key := lipgloss.NewStyle().Bold(true)
+	sep := lipgloss.NewStyle().Faint(true)
+	h.Styles = help.Styles{
+		Ellipsis: sep, ShortKey: key, ShortDesc: lipgloss.NewStyle(), ShortSeparator: sep,
+		FullKey: key, FullDesc: lipgloss.NewStyle(), FullSeparator: sep,
+	}
+	h.ShortSeparator, h.Ellipsis = g.sep, g.ellipsis
+	return h
 }
 
 func (m *model) Init() tea.Cmd {
@@ -231,7 +286,24 @@ func (m *model) usableHits() []links.Server {
 }
 
 func (m *model) setMsg(isErr bool, format string, a ...any) {
-	m.msg, m.msgErr = fmt.Sprintf(format, a...), isErr
+	m.msg, m.msgErr = m.g.safe(fmt.Sprintf(format, a...)), isErr
+	m.msgID++
+}
+
+// clearMsg drops the message, if any.
+func (m *model) clearMsg() {
+	if m.msg != "" {
+		m.msg, m.msgErr = "", false
+		m.msgID++
+	}
+}
+
+// endBusy marks the running work as finished and releases its context.
+func (m *model) endBusy() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+	m.busy, m.cancel, m.cancelling = "", nil, false
 }
 
 func (m *model) fetchStatus() tea.Msg {
@@ -243,6 +315,18 @@ func (m *model) fetchStatus() tea.Msg {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	before := m.msgID
+	_, cmd := m.update(msg)
+	m.syncKeys()
+	// Notices fade after a while; errors stay until the next key press.
+	if m.msgID != before && m.msg != "" && !m.msgErr && m.msgTTL > 0 {
+		id := m.msgID
+		cmd = tea.Batch(cmd, tea.Tick(m.msgTTL, func(time.Time) tea.Msg { return msgClearMsg{id} }))
+	}
+	return m, cmd
+}
+
+func (m *model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
@@ -251,6 +335,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.fetchStatus, tick())
 	case statusMsg:
 		m.status = msg.st
+		return m, nil
+	case msgClearMsg:
+		if msg.id == m.msgID && m.busy == "" && m.confirm == nil {
+			m.clearMsg()
+		}
 		return m, nil
 	case spinner.TickMsg:
 		if m.busy == "" {
@@ -264,8 +353,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case testedMsg:
 		return m.onTested(msg)
 	case checkMsg:
-		m.busy = ""
-		if msg.r.OK() {
+		cancelled := m.cancelling
+		m.endBusy()
+		if cancelled {
+			m.setMsg(false, "connection check cancelled")
+		} else if msg.r.OK() {
 			m.setMsg(false, "connected through the proxy in %d ms", msg.r.Latency.Milliseconds())
 		} else {
 			m.setMsg(true, "no connection through the proxy: %v", msg.r.Err)
@@ -276,7 +368,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logs.GotoBottom()
 		return m, nil
 	case opMsg:
-		m.busy = ""
+		m.endBusy()
 		if msg.err != nil {
 			m.setMsg(true, "%s failed: %v", msg.what, msg.err)
 		} else {
@@ -288,6 +380,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case removedMsg:
 		return m.onRemoved(msg)
 	case tea.PasteMsg:
+		if m.showHelp {
+			return m, nil
+		}
 		// Pasting links into the search box opens the add screen with them.
 		if m.screen == searchScreen && strings.Contains(msg.Content, "://") {
 			cmd := m.openAdd()
@@ -326,6 +421,17 @@ func (m *model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if key.Matches(k, m.keys.Quit) {
 		return m, tea.Quit
 	}
+	if m.showHelp { // any other key closes the help
+		m.showHelp = false
+		return m, nil
+	}
+	if m.msgErr && m.busy == "" && m.confirm == nil {
+		m.clearMsg() // an error is read by now
+	}
+	if key.Matches(k, m.keys.Help) {
+		m.showHelp = true
+		return m, nil
+	}
 	if c := m.confirm; c != nil {
 		m.confirm = nil
 		switch k.String() {
@@ -359,6 +465,9 @@ func (m *model) searchKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.move(m.listHeight())
 		return m, nil
 	case key.Matches(k, m.keys.Clear):
+		if m.cancel != nil {
+			return m.cancelBusy()
+		}
 		if m.query.Value() == "" {
 			return m, tea.Quit
 		}
@@ -384,7 +493,68 @@ func (m *model) searchKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.action(k)
 	}
+	if why, ok := m.why[k.String()]; ok { // a known action that cannot run now
+		m.setMsg(true, "%s", why)
+		return m, nil
+	}
 	return m.forward(k) // everything else edits the search box
+}
+
+// cancelBusy asks the running work to stop. It stays marked busy until the
+// work reports back, so nothing else starts on top of it.
+func (m *model) cancelBusy() (tea.Model, tea.Cmd) {
+	if !m.cancelling {
+		m.cancelling = true
+		m.cancel()
+		m.setMsg(false, "cancelling…")
+	}
+	return m, nil
+}
+
+// syncKeys enables only the bindings that can do something now, so the help
+// bar offers what works, and names the start/stop action truthfully.
+func (m *model) syncKeys() {
+	clear(m.why)
+	gate := func(b *key.Binding, ok bool, why string) {
+		b.SetEnabled(ok)
+		if !ok && why != "" {
+			for _, k := range b.Keys() {
+				m.why[k] = why
+			}
+		}
+	}
+	searching := m.screen == searchScreen
+	sel := m.selected()
+	useWhy := ""
+	if sel != nil && !sel.Usable() {
+		useWhy = fmt.Sprintf("#%d cannot be used: %s", sel.Index, sel.Problem)
+	}
+	gate(&m.keys.Use, !searching || (sel != nil && sel.Usable()), useWhy)
+	gate(&m.keys.Remove, !searching || sel != nil, "no server selected")
+	nUsable := len(m.usableHits())
+	gate(&m.keys.Test, !searching || nUsable > 0, "no usable servers in the results")
+	gate(&m.keys.Best, !searching || nUsable > 0, "no usable servers in the results")
+	gate(&m.keys.Auto, !searching || m.countUsable() > 0, "no usable servers: add some with ^n")
+	if m.status.Active {
+		m.keys.Power.SetHelp("^s", "stop")
+	} else {
+		m.keys.Power.SetHelp("^s", "start")
+	}
+	if m.cancel != nil {
+		m.keys.Clear.SetHelp("esc", "cancel")
+	} else {
+		m.keys.Clear.SetHelp("esc", "clear/quit")
+	}
+}
+
+func (m *model) countUsable() int {
+	n := 0
+	for i := range m.servers {
+		if m.servers[i].Usable() {
+			n++
+		}
+	}
+	return n
 }
 
 func (m *model) action(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -431,32 +601,51 @@ func (m *model) action(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) startBusy(what string) tea.Cmd {
+// startBusy marks the UI busy. The returned context is cancelled by esc;
+// pass it to the work so it stops early.
+func (m *model) startBusy(what string) (context.Context, tea.Cmd) {
+	m.endBusy()
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.busy, m.cancel = what, cancel
+	return ctx, m.spin.Tick
+}
+
+// startUncancellable is for work that must not be interrupted halfway, like
+// rewriting the server list.
+func (m *model) startUncancellable(what string) tea.Cmd {
+	m.endBusy()
 	m.busy = what
 	return m.spin.Tick
 }
 
 func (m *model) doSwitch(st manage.State) tea.Cmd {
 	m.setMsg(false, "switching to %s…", st.Describe())
-	return tea.Batch(m.startBusy("switching"), func() tea.Msg {
-		st, err := m.mgr.Switch(m.ctx, st)
+	ctx, spin := m.startBusy("switching")
+	return tea.Batch(spin, func() tea.Msg {
+		st, err := m.mgr.Switch(ctx, st)
 		return switchedMsg{st, err}
 	})
 }
 
 func (m *model) onSwitched(msg switchedMsg) (tea.Model, tea.Cmd) {
-	m.busy = ""
+	cancelled := m.cancelling
+	m.endBusy()
 	// A failed restart can follow a successful write; show what is saved.
 	if saved, err := m.mgr.State(); err == nil {
 		m.state = saved
 	}
 	if msg.err != nil {
-		m.setMsg(true, "switch failed: %v", msg.err)
+		if cancelled {
+			m.setMsg(false, "cancelled — the server was not changed")
+		} else {
+			m.setMsg(true, "switch failed: %v", msg.err)
+		}
 		return m, m.fetchStatus
 	}
 	m.state = msg.st
 	m.setMsg(false, "now using %s — checking the connection…", msg.st.Describe())
-	return m, tea.Batch(m.fetchStatus, m.startBusy("checking"), m.check(2*time.Second))
+	ctx, spin := m.startBusy("checking")
+	return m, tea.Batch(m.fetchStatus, spin, m.check(ctx, 2*time.Second))
 }
 
 // testResults tests every usable server in the current results at once.
@@ -468,8 +657,9 @@ func (m *model) testResults(useBest bool) tea.Cmd {
 	}
 	m.setMsg(false, "testing %d servers (up to %s)…", len(cands), probeTimeout)
 	t, url := m.mgr.T, m.probeURL
-	return tea.Batch(m.startBusy("testing"), func() tea.Msg {
-		byIndex, err := probe.All(m.ctx, t.Path(layout.XrayBin), t.Path(layout.AssetDir), cands, url, probeTimeout)
+	ctx, spin := m.startBusy("testing")
+	return tea.Batch(spin, func() tea.Msg {
+		byIndex, err := probe.All(ctx, t.Path(layout.XrayBin), t.Path(layout.AssetDir), cands, url, probeTimeout)
 		results := make(map[string]probe.Result, len(byIndex))
 		for _, s := range cands {
 			if r, ok := byIndex[s.Index]; ok {
@@ -481,7 +671,12 @@ func (m *model) testResults(useBest bool) tea.Cmd {
 }
 
 func (m *model) onTested(msg testedMsg) (tea.Model, tea.Cmd) {
-	m.busy = ""
+	cancelled := m.cancelling
+	m.endBusy()
+	if cancelled { // half-finished results would only mislead
+		m.setMsg(false, "cancelled — no servers were tested")
+		return m, nil
+	}
 	if msg.err != nil {
 		m.setMsg(true, "test failed: %v", msg.err)
 		return m, nil
@@ -553,11 +748,15 @@ func (m *model) fastest(results map[string]probe.Result) *links.Server {
 	return best
 }
 
-func (m *model) check(delay time.Duration) tea.Cmd {
+func (m *model) check(ctx context.Context, delay time.Duration) tea.Cmd {
 	port, url := m.state.SocksPort, m.probeURL
 	return func() tea.Msg {
-		time.Sleep(delay)
-		return checkMsg{probe.Through(m.ctx, fmt.Sprintf("127.0.0.1:%d", port), url, 15*time.Second)}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return checkMsg{probe.Result{Err: ctx.Err()}}
+		}
+		return checkMsg{probe.Through(ctx, fmt.Sprintf("127.0.0.1:%d", port), url, 15*time.Second)}
 	}
 }
 
@@ -566,7 +765,7 @@ func (m *model) op(what string, fn func(service.Manager) error) tea.Cmd {
 		m.setMsg(true, "no supported service manager on this system")
 		return nil
 	}
-	return tea.Batch(m.startBusy(what), func() tea.Msg { return opMsg{what, fn(m.mgr.Svc)} })
+	return tea.Batch(m.startUncancellable(what), func() tea.Msg { return opMsg{what, fn(m.mgr.Svc)} })
 }
 
 func (m *model) fetchLogs() tea.Msg {
@@ -581,14 +780,14 @@ func (m *model) fetchLogs() tea.Msg {
 }
 
 func (m *model) doRemove(s links.Server) tea.Cmd {
-	return tea.Batch(m.startBusy("removing"), func() tea.Msg {
+	return tea.Batch(m.startUncancellable("removing"), func() tea.Msg {
 		removed, st, err := m.mgr.Remove(m.ctx, s.Key())
 		return removedMsg{removed, st, err}
 	})
 }
 
 func (m *model) onRemoved(msg removedMsg) (tea.Model, tea.Cmd) {
-	m.busy = ""
+	m.endBusy()
 	if err := m.reload(); err != nil {
 		m.setMsg(true, "%v", err)
 		return m, nil
@@ -640,15 +839,30 @@ func (m *model) addKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return addedMsg{plan, err}
 		}
 	case key.Matches(k, m.keys.Cancel):
-		if len(m.servers) == 0 {
-			return m, tea.Quit // nothing to go back to
+		// Pasted links are long and hard to get back, so ask first.
+		if m.plan != nil && len(m.plan.New) > 0 {
+			n := len(m.plan.New)
+			m.confirm = &confirmation{
+				prompt: fmt.Sprintf("Discard %d pasted link(s)? (y/N)", n),
+				yes:    m.leaveAdd,
+			}
+			return m, nil
 		}
-		m.screen = searchScreen
-		m.add.Blur()
-		m.msg = ""
-		return m, m.query.Focus()
+		return m, m.leaveAdd()
 	}
 	return m.forward(k)
+}
+
+// leaveAdd goes back to the search screen, or quits when the list is empty
+// and there is nothing to go back to.
+func (m *model) leaveAdd() tea.Cmd {
+	if len(m.servers) == 0 {
+		return tea.Quit
+	}
+	m.screen = searchScreen
+	m.add.Blur()
+	m.clearMsg()
+	return m.query.Focus()
 }
 
 func (m *model) onAdded(msg addedMsg) (tea.Model, tea.Cmd) {
