@@ -24,39 +24,26 @@ import (
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = `sneakernet %s — offline Xray client manager
-
-Usage: sneakernet <command> [flags]
-
-Commands:
-  install     install Xray and the preset servers (run from the USB stick)
-  tui         terminal UI: switch servers, test them, watch logs
-  status      show the service, the active server and the proxy ports
-  list        list the servers
-  add         add servers: sneakernet add links.txt  |  ... | sneakernet add
-  remove      remove a server:  sneakernet remove 12
-  switch      use another server:  sneakernet switch 12  |  sneakernet switch auto
-  test        check the connection (--all tests every server)
-  doctor      diagnose an installation
-  uninstall   remove everything sneakernet installed
-  convert     print the Xray config for a server list (no install needed)
-  version     print the version
-
-Run "sneakernet <command> -h" for the flags of a command.
-`
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout))
+	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func run(ctx context.Context, args []string, in io.Reader, out io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintf(out, usage, version)
-		return 2
+// run executes one command line and returns the exit code (see cli.go).
+func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer) int {
+	rest, g, gerr := parseGlobals(args, os.Getenv)
+	u := newUI(in, out, errOut, g)
+	if gerr != nil {
+		u.fail("%v", gerr)
+		return exitUsage
 	}
-	u := newUI(in, out)
+	u.args = rest
+	if len(rest) == 0 {
+		u.showBanner(errOut)
+		fmt.Fprint(errOut, usageText())
+		return exitUsage
+	}
 	cmds := map[string]func(context.Context, []string, *ui) error{
 		"install":   cmdInstall,
 		"tui":       cmdTUI,
@@ -69,36 +56,84 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) int {
 		"doctor":    cmdDoctor,
 		"uninstall": cmdUninstall,
 		"convert":   cmdConvert,
-		"version": func(context.Context, []string, *ui) error {
-			fmt.Fprintf(out, "sneakernet %s (%s)\n", version, detect.Arch())
-			return nil
-		},
+		"version":   cmdVersion,
 	}
-	switch args[0] {
-	case "-h", "--help", "help":
-		fmt.Fprintf(out, usage, version)
-		return 0
+	name := rest[0]
+	switch name {
+	case "-h", "-help", "--help":
+		u.showBanner(out)
+		fmt.Fprint(out, usageText())
+		return exitOK
+	case "help":
+		if len(rest) == 1 {
+			u.showBanner(out)
+			fmt.Fprint(out, usageText())
+			return exitOK
+		}
+		name = rest[1]
+		cmd, ok := cmds[name]
+		if !ok {
+			return unknownCommand(u, name)
+		}
+		d, _ := docFor(name)
+		printHelp(ctx, d, cmd, u)
+		return exitOK
 	}
-	cmd, ok := cmds[args[0]]
+	cmd, ok := cmds[name]
 	if !ok {
-		fmt.Fprintf(out, "unknown command %q\n\n"+usage, args[0], version)
-		return 2
+		return unknownCommand(u, name)
 	}
-	if err := cmd(ctx, args[1:], u); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
+	for _, a := range rest[1:] {
+		if a == "--" {
+			break
 		}
-		if errors.Is(err, errReexec) {
-			return 0
+		if a == "-h" || a == "-help" || a == "--help" {
+			d, _ := docFor(name)
+			printHelp(ctx, d, cmd, u)
+			return exitOK
 		}
-		var ee *exitError
-		if errors.As(err, &ee) {
-			return ee.code
-		}
-		u.fail("%v", err)
-		return 1
 	}
-	return 0
+	err := cmd(ctx, rest[1:], u)
+	if err == nil {
+		return exitOK
+	}
+	var ee *exitError
+	var ce *codedError
+	switch {
+	case errors.Is(err, flag.ErrHelp), errors.Is(err, errReexec):
+		return exitOK
+	case errors.As(err, &ee):
+		return ee.code // the message was printed already
+	case isFlagError(err):
+		return exitUsage // the flag package printed it with the usage
+	case errors.As(err, &ce):
+		u.fail("%v", ce.err)
+		return ce.code
+	case ctx.Err() != nil:
+		u.fail("interrupted")
+		return exitInterrupted
+	}
+	u.fail("%v", err)
+	return exitFailed
+}
+
+func unknownCommand(u *ui, name string) int {
+	u.fail("unknown command %q", name)
+	if s := suggest(name, commandNames()); len(s) > 0 {
+		fmt.Fprintf(u.err, "    Did you mean %q?\n", s[0])
+	}
+	fmt.Fprintln(u.err, "    Run \"sneakernet help\" for the list of commands.")
+	return exitUsage
+}
+
+func cmdVersion(_ context.Context, args []string, u *ui) error {
+	fs := newFlags("version", u)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	u.showBanner(u.out)
+	u.printf("sneakernet %s (%s)\n", version, detect.Arch())
+	return nil
 }
 
 // exitError ends the program with a code after the message was printed.
@@ -130,21 +165,23 @@ func openEnv(root string) *env {
 }
 
 // requireRoot re-runs the command with sudo when it needs root. With a
-// --root test directory no privileges are needed.
+// --root test directory no privileges are needed. sudo resets the
+// environment, so the global flags that depend on it travel as arguments.
 func requireRoot(u *ui, root string) error {
 	if root != "" || os.Geteuid() == 0 {
 		return nil
 	}
 	sudo, err := exec.LookPath("sudo")
 	if err != nil {
-		return errors.New("this command needs root; run it as root")
+		return coded(exitNeedRoot, "this command needs root; run it as root")
 	}
 	self, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	u.printf("%s\n", u.dim("needs root — running it with sudo"))
-	cmd := exec.Command(sudo, append([]string{self}, os.Args[1:]...)...)
+	u.notef("needs root — running it with sudo")
+	args := append(append([]string{self}, u.reexecGlobals()...), u.args...)
+	cmd := exec.Command(sudo, args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		var xe *exec.ExitError

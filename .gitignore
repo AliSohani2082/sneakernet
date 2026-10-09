@@ -4,3 +4,5 @@ dist/
 config/servers.txt
 config/servers.age
 *.minisign.key
+result
+result-*

@@ -8,10 +8,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/AliSohani2082/sneakernet/internal/detect"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
@@ -77,6 +79,18 @@ func (s *Systemd) unitPath(name string) string {
 	return s.T.Path(filepath.Join(layout.UnitDir, name))
 }
 
+func (s *Systemd) runtimePath(name string) string {
+	return s.T.Path(filepath.Join(layout.RuntimeUnitDir, name))
+}
+
+// Persistent reports whether the unit survives a reboot. It is false when
+// the unit had to go to /run/systemd/system because /etc/systemd/system is
+// read-only.
+func (s *Systemd) Persistent(name string) bool {
+	_, err := os.Stat(s.runtimePath(name))
+	return err != nil
+}
+
 func (s *Systemd) systemctl(args ...string) ([]byte, error) {
 	if !s.T.Running {
 		args = append([]string{"--root=" + s.T.Root}, args...)
@@ -84,12 +98,17 @@ func (s *Systemd) systemctl(args ...string) ([]byte, error) {
 	return s.Run("systemctl", args...)
 }
 
+// Install writes the unit to /etc/systemd/system. When that directory is
+// read-only (NixOS links it into the Nix store) and the target is the running
+// system, the unit goes to /run/systemd/system instead, for this boot only.
 func (s *Systemd) Install(name string, unit []byte) error {
-	p := s.unitPath(name)
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return err
+	err := s.writeUnit(filepath.Join(layout.UnitDir, name), unit)
+	if err != nil && s.T.Running && ReadOnly(err) {
+		err = s.writeUnit(filepath.Join(layout.RuntimeUnitDir, name), unit)
+	} else if err == nil {
+		_ = s.T.Remove(filepath.Join(layout.RuntimeUnitDir, name)) // a writable /etc wins over an old runtime copy
 	}
-	if err := os.WriteFile(p, unit, 0o644); err != nil {
+	if err != nil {
 		return err
 	}
 	if s.T.Running {
@@ -99,12 +118,29 @@ func (s *Systemd) Install(name string, unit []byte) error {
 	return nil
 }
 
+// writeUnit replaces the unit atomically and never writes through a symlink
+// (a planted unit -> /etc/shadow would otherwise be truncated), and stays
+// inside the target root.
+func (s *Systemd) writeUnit(path string, data []byte) error {
+	return s.T.WriteFile(path, data, 0o644)
+}
+
+// ReadOnly reports whether err means a file could not be written because
+// the directory or filesystem is read-only.
+func ReadOnly(err error) bool {
+	return errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
 func (s *Systemd) Enable(name string) error {
-	if s.T.Running {
-		_, err := s.systemctl("enable", "--now", name)
+	if !s.T.Running {
+		_, err := s.systemctl("enable", name)
 		return err
 	}
-	_, err := s.systemctl("enable", name)
+	args := []string{"enable", "--now", name}
+	if !s.Persistent(name) {
+		args = []string{"enable", "--runtime", "--now", name}
+	}
+	_, err := s.systemctl(args...)
 	return err
 }
 
@@ -122,13 +158,23 @@ func (s *Systemd) live(verb, name string) error {
 }
 
 func (s *Systemd) Remove(name string) error {
-	if s.T.Running {
-		_, _ = s.systemctl("disable", "--now", name)
-	} else {
+	switch {
+	case !s.T.Running:
 		_, _ = s.systemctl("disable", name)
+	case s.Persistent(name):
+		_, _ = s.systemctl("disable", "--now", name)
+	default:
+		_, _ = s.systemctl("disable", "--runtime", "--now", name)
 	}
-	if err := os.Remove(s.unitPath(name)); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, p := range []string{filepath.Join(layout.UnitDir, name), filepath.Join(layout.RuntimeUnitDir, name)} {
+		// Check first: on a read-only filesystem even removing a missing
+		// file fails (EROFS), not just with "not found".
+		if _, err := s.T.Lstat(p); err != nil {
+			continue
+		}
+		if err := s.T.Remove(p); err != nil {
+			return err
+		}
 	}
 	if s.T.Running {
 		_, _ = s.systemctl("daemon-reload")

@@ -10,10 +10,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/AliSohani2082/sneakernet/internal/bundle"
-	"github.com/AliSohani2082/sneakernet/internal/fsutil"
+	"github.com/AliSohani2082/sneakernet/internal/detect"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/links"
 	"github.com/AliSohani2082/sneakernet/internal/manage"
@@ -52,8 +54,10 @@ type Result struct {
 	State     manage.State
 	Started   bool   // the service is running now
 	Enabled   bool   // the service starts at boot
+	BootOnly  bool   // the unit lives in /run: gone after a reboot (read-only /etc/systemd/system)
 	NoServers bool   // nothing usable to connect to yet
 	Manual    string // how to start Xray when there is no service manager
+	Command   string // how to run sneakernet: "sneakernet" when on PATH, else the full path
 	Manifest  Manifest
 }
 
@@ -71,36 +75,49 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		Dirs:        []string{layout.OptDir, layout.EtcDir, layout.VarDir},
 	}
 
+	// Managed directories must be real, root-owned and not writable by
+	// others: we are about to put privileged executables in them.
 	for _, d := range []struct {
 		path string
 		perm os.FileMode
-	}{{layout.BinDir, 0o755}, {layout.AssetDir, 0o755}, {layout.EtcDir, 0o700}, {layout.VarDir, 0o755}} {
-		if err := os.MkdirAll(t.Path(d.path), d.perm); err != nil {
+	}{{layout.OptDir, 0o755}, {layout.BinDir, 0o755}, {layout.AssetDir, 0o755}, {layout.EtcDir, 0o700}, {layout.VarDir, 0o755}} {
+		if err := t.EnsureDir(d.path, d.perm); err != nil {
 			return nil, err
 		}
+	}
+
+	// Copy the payload into a private directory and check those bytes; only
+	// the staged files are installed or executed from here on.
+	stage, err := o.Bundle.Stage("")
+	if err != nil {
+		return nil, err
+	}
+	defer stage.Cleanup()
+	if err := stage.Verify(); err != nil {
+		return nil, err
 	}
 	copies := []struct {
 		src, dst string
 		perm     os.FileMode
 	}{
-		{o.Bundle.XrayBin(), layout.XrayBin, 0o755},
-		{o.Bundle.SelfBin(), layout.SelfBin, 0o755},
+		{stage.XrayBin(), layout.XrayBin, 0o755},
+		{stage.SelfBin(), layout.SelfBin, 0o755},
 	}
 	for _, g := range layout.GeoFiles {
 		copies = append(copies, struct {
 			src, dst string
 			perm     os.FileMode
-		}{filepath.Join(o.Bundle.AssetDir(), g), filepath.Join(layout.AssetDir, g), 0o644})
+		}{filepath.Join(stage.AssetDir(), g), filepath.Join(layout.AssetDir, g), 0o644})
 	}
 	for _, c := range copies {
 		log("copy %s", c.dst)
-		if err := fsutil.CopyFile(c.src, t.Path(c.dst), c.perm); err != nil {
+		if err := t.CopyFile(c.src, c.dst, c.perm); err != nil {
 			return nil, fmt.Errorf("copy %s: %w", c.dst, err)
 		}
 		m.Files = append(m.Files, c.dst)
 	}
 	log("write %s", layout.ServersFile)
-	if err := fsutil.WriteFile(t.Path(layout.ServersFile), o.Servers, 0o600); err != nil {
+	if err := t.WriteFile(layout.ServersFile, o.Servers, 0o600); err != nil {
 		return nil, err
 	}
 	m.Files = append(m.Files, layout.ServersFile)
@@ -112,22 +129,29 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 			return nil, fmt.Errorf("create service user: %w", err)
 		}
 		m.Files = append(m.Files, layout.SysusersFile)
-		if err := os.Chmod(t.Path(layout.EtcDir), 0o750); err != nil {
+		if err := t.Chmod(layout.EtcDir, 0o750); err != nil {
 			return nil, err
 		}
-		if err := service.ChownToGroup(t.Path(layout.EtcDir), gid); err != nil {
+		if err := service.ChownToGroup(t, layout.EtcDir, gid); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := linkCommand(t); err != nil {
-		log("note: could not create %s: %v", layout.CommandLink, err)
-	} else {
-		m.Links = append(m.Links, layout.CommandLink)
+	res := &Result{State: o.State, Command: layout.SelfBin}
+	osInfo, _ := detect.ReadOS(t.Root)
+	if dir, onPath := commandDir(t, osInfo.Family); dir != "" {
+		link := filepath.Join(dir, layout.CommandName)
+		if err := linkCommand(t, link); err != nil {
+			log("note: could not create %s: %v", link, err)
+		} else {
+			m.Links = append(m.Links, link)
+			if onPath {
+				res.Command = layout.CommandName
+			}
+		}
 	}
 
-	mgr := &manage.Manager{T: t, Svc: o.Svc}
-	res := &Result{State: o.State}
+	mgr := &manage.Manager{T: t, Svc: o.Svc, XrayBin: stage.XrayBin(), AssetDir: stage.AssetDir()}
 	servers, _, err := mgr.Servers()
 	if err != nil {
 		return nil, err
@@ -168,6 +192,9 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 			res.Enabled = true
 			res.Started = t.Running
 		}
+		if sd, ok := o.Svc.(*service.Systemd); ok && !sd.Persistent(layout.UnitName) {
+			res.BootOnly = true
+		}
 	}
 
 	res.Manifest = m
@@ -175,7 +202,7 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := fsutil.WriteFile(t.Path(layout.ManifestFile), append(b, '\n'), 0o644); err != nil {
+	if err := t.WriteFile(layout.ManifestFile, append(b, '\n'), 0o644); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -191,21 +218,83 @@ func countUsable(servers []links.Server) int {
 	return n
 }
 
-// linkCommand puts `sneakernet` on PATH without clobbering a file we did not create.
-func linkCommand(t target.Target) error {
-	link := t.Path(layout.CommandLink)
-	if fi, err := os.Lstat(link); err == nil {
-		if fi.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("%s exists and is not a symlink", layout.CommandLink)
+// commandDir picks the directory for the `sneakernet` link and reports
+// whether it is on PATH. See pickCommandDir.
+func commandDir(t target.Target, family string) (string, bool) {
+	if !t.Running {
+		// Another root's PATH is unknown; /usr/local/bin is on it everywhere
+		// except NixOS, which has no writable directory on PATH at all.
+		if family == "nixos" {
+			return "", false
 		}
-		if err := os.Remove(link); err != nil {
+		return filepath.Dir(layout.CommandLink), true
+	}
+	path := os.Getenv("PATH")
+	if family == "nixos" {
+		path = nixosWrappers + ":" + path // first on every user's PATH there
+	}
+	return pickCommandDir(path, family != "nixos", writableDir)
+}
+
+// nixosWrappers is a root-writable tmpfs directory that NixOS puts first on
+// every PATH. Links there last until the next reboot or nixos-rebuild.
+const nixosWrappers = "/run/wrappers/bin"
+
+// pickCommandDir prefers /usr/local/bin when it is on PATH (and preferLocal
+// is set). Otherwise it takes the first PATH entry that usable accepts,
+// skipping directories owned by the package manager and home directories.
+// With nothing suitable it falls back to /usr/local/bin, not on PATH.
+func pickCommandDir(path string, preferLocal bool, usable func(string) bool) (string, bool) {
+	local := filepath.Dir(layout.CommandLink)
+	dirs := filepath.SplitList(path)
+	if preferLocal {
+		for _, d := range dirs {
+			if filepath.Clean(d) == local {
+				return local, true
+			}
+		}
+	}
+	for _, d := range dirs {
+		d = filepath.Clean(d)
+		switch {
+		case !filepath.IsAbs(d), d == local,
+			d == "/usr/bin", d == "/bin", d == "/usr/sbin", d == "/sbin",
+			strings.HasPrefix(d, "/nix/"), strings.HasPrefix(d, "/home/"), strings.HasPrefix(d, "/root"):
+			continue
+		}
+		if usable(d) {
+			return d, true
+		}
+	}
+	return local, false
+}
+
+// writableDir reports whether dir can take a new file: it resolves outside
+// the Nix store and is writable (which also fails on read-only mounts).
+func writableDir(dir string) bool {
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil || strings.HasPrefix(real, "/nix/store/") {
+		return false
+	}
+	return syscall.Access(real, 2 /* W_OK */) == nil
+}
+
+// linkCommand links `sneakernet` at link without clobbering a file we did
+// not create.
+func linkCommand(t target.Target, link string) error {
+	path := link
+	if fi, err := t.Lstat(link); err == nil {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("%s exists and is not a symlink", path)
+		}
+		if err := t.Remove(link); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+	if err := t.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		return err
 	}
-	return os.Symlink(layout.SelfBin, link)
+	return t.Symlink(layout.SelfBin, link)
 }
 
 // restoreSELinuxLabels gives copied files the default labels for their paths
@@ -232,7 +321,7 @@ func Uninstall(t target.Target, svc service.Manager, log func(string, ...any)) e
 		log = func(string, ...any) {}
 	}
 	m := Manifest{Links: []string{layout.CommandLink}, Units: []string{layout.UnitName}}
-	if b, err := os.ReadFile(t.Path(layout.ManifestFile)); err == nil {
+	if b, err := t.ReadFile(layout.ManifestFile); err == nil {
 		if err := json.Unmarshal(b, &m); err != nil {
 			return fmt.Errorf("%s: %w", layout.ManifestFile, err)
 		}
@@ -248,21 +337,24 @@ func Uninstall(t target.Target, svc service.Manager, log func(string, ...any)) e
 		log("remove %s", u)
 		errs = append(errs, svc.Remove(u))
 	}
-	if _, err := os.Stat(t.Path(layout.SysusersFile)); err == nil {
-		log("remove the %s system user", layout.ServiceUser)
-		service.RemoveUser(t, nil)
+	// Only a user we created: our sysusers entry is in /etc or /run.
+	for _, conf := range []string{layout.SysusersFile, layout.RuntimeSysusersFile} {
+		if _, err := os.Stat(t.Path(conf)); err == nil {
+			log("remove the %s system user", layout.ServiceUser)
+			service.RemoveUser(t, nil)
+			break
+		}
 	}
 	for _, l := range m.Links {
-		p := t.Path(l)
-		if dst, err := os.Readlink(p); err == nil && dst == layout.SelfBin {
+		if dst, err := t.Readlink(l); err == nil && dst == layout.SelfBin {
 			log("remove %s", l)
-			errs = append(errs, os.Remove(p))
+			errs = append(errs, t.Remove(l))
 		}
 	}
 	// Only our own directories, whatever the manifest says.
 	for _, d := range []string{layout.OptDir, layout.EtcDir, layout.VarDir} {
 		log("remove %s", d)
-		errs = append(errs, os.RemoveAll(t.Path(d)))
+		errs = append(errs, t.RemoveAll(d))
 	}
 	return errors.Join(errs...)
 }

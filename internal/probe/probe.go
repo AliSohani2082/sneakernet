@@ -116,8 +116,8 @@ func All(ctx context.Context, xrayBin, assetDir string, servers []links.Server, 
 	defer stop()
 	cmd := exec.CommandContext(runCtx, xrayBin, "run", "-c", path)
 	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetDir)
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := &tailBuffer{max: 16 << 10}
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -125,7 +125,10 @@ func All(ctx context.Context, xrayBin, assetDir string, servers []links.Server, 
 	go func() { _ = cmd.Wait(); close(exited) }()
 	defer func() { stop(); <-exited }()
 
-	if err := waitListening(ctx, ports[0], exited); err != nil {
+	if err := waitListening(ctx, ports[0], startTimeout, exited); err != nil {
+		// Let the process and its output copier finish before reading.
+		stop()
+		<-exited
 		return nil, fmt.Errorf("probe xray did not start: %v: %s", err, lastLine(out.String()))
 	}
 
@@ -168,8 +171,11 @@ func freePorts(n int) ([]int, error) {
 	return ports, nil
 }
 
-func waitListening(ctx context.Context, port int, exited <-chan struct{}) error {
-	deadline := time.Now().Add(10 * time.Second)
+// startTimeout is how long the probe Xray gets to open its first port.
+var startTimeout = 10 * time.Second
+
+func waitListening(ctx context.Context, port int, wait time.Duration, exited <-chan struct{}) error {
+	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
 		select {
 		case <-exited:
@@ -190,4 +196,29 @@ func waitListening(ctx context.Context, port int, exited <-chan struct{}) error 
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
+}
+
+// tailBuffer keeps the last max bytes written to it. exec copies stdout and
+// stderr from its own goroutines, so reads and writes need the lock, and a
+// chatty child cannot grow memory without bound.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	b   []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.b = append(t.b, p...)
+	if len(t.b) > t.max {
+		t.b = append(t.b[:0], t.b[len(t.b)-t.max:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.b)
 }

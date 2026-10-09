@@ -172,3 +172,32 @@ func TestParseListAndSubscription(t *testing.T) {
 		t.Fatalf("subscription: %d servers, err=%v", len(servers), err)
 	}
 }
+
+func TestNamesAreSanitized(t *testing.T) {
+	cases := []struct{ frag, want string }{
+		{"%1B%5B31mred%1B%5B0m", "red"},                                     // CSI colour
+		{"a%1B%5D0%3Bevil%07b", "ab"},                                       // OSC title, BEL terminated
+		{"a%1B%5D8%3B%3Bhttp%3A%2F%2Fx%1B%5Cb", "ab"},                       // OSC hyperlink, ST terminated
+		{"line1%0D%0Aline2", "line1line2"},                                  // CR/LF
+		{"x%E2%80%AEevil", "xevil"},                                         // right-to-left override
+		{"%F0%9F%87%A9%F0%9F%87%AA%20DE%20%D8%A7%DB%8C%D8%B1", "🇩🇪 DE ایر"}, // emoji and non-Latin stay
+	}
+	for _, c := range cases {
+		s, err := Parse("trojan://pw@example.com:443?security=tls&sni=example.com#" + c.frag)
+		if err != nil {
+			t.Fatalf("%q: %v", c.frag, err)
+		}
+		if s.Name != c.want {
+			t.Errorf("%q: name %q, want %q", c.frag, s.Name, c.want)
+		}
+		if !strings.Contains(s.Raw, c.frag) {
+			t.Errorf("%q: Raw must keep the original link", c.frag)
+		}
+	}
+	// vmess names come from JSON "ps".
+	js := `{"v":"2","ps":"a\u001b[2Jb\nc","add":"example.com","port":"443","id":"11111111-1111-1111-1111-111111111111","net":"tcp"}`
+	s, err := Parse("vmess://" + base64.StdEncoding.EncodeToString([]byte(js)))
+	if err != nil || s.Name != "abc" {
+		t.Errorf("vmess name %q err %v", s.Name, err)
+	}
+}

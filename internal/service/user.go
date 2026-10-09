@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AliSohani2082/sneakernet/internal/fsutil"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/target"
 )
@@ -17,19 +16,27 @@ u ` + layout.ServiceUser + ` - "Sneakernet Xray client" - -
 `
 
 // EnsureUser creates the service user with systemd-sysusers, which works
-// offline and against another root (--root). It returns the user's group id.
+// offline and against another root (--root). The entry goes to
+// /etc/sysusers.d, or to /run/sysusers.d when /etc/sysusers.d is read-only
+// on the running system (NixOS). It returns the user's group id.
 func EnsureUser(t target.Target, run Runner) (int, error) {
 	if run == nil {
 		run = execRunner
 	}
-	if err := fsutil.WriteFile(t.Path(layout.SysusersFile), []byte(sysusersConf), 0o644); err != nil {
+	conf := layout.SysusersFile
+	err := t.WriteFile(conf, []byte(sysusersConf), 0o644)
+	if err != nil && t.Running && ReadOnly(err) {
+		conf = layout.RuntimeSysusersFile
+		err = t.WriteFile(conf, []byte(sysusersConf), 0o644)
+	}
+	if err != nil {
 		return 0, err
 	}
 	args := []string{}
 	if !t.Running {
 		args = append(args, "--root="+t.Root)
 	}
-	if _, err := run("systemd-sysusers", append(args, t.Path(layout.SysusersFile))...); err != nil {
+	if _, err := run("systemd-sysusers", append(args, t.Path(conf))...); err != nil {
 		return 0, err
 	}
 	return GroupID(t, layout.ServiceUser)
@@ -46,19 +53,23 @@ func RemoveUser(t target.Target, run Runner) {
 		_, _ = run("userdel", layout.ServiceUser)
 	} else {
 		for _, db := range []string{"/etc/passwd", "/etc/group", "/etc/shadow", "/etc/gshadow"} {
-			_ = dropEntry(t.Path(db), layout.ServiceUser)
+			_ = dropEntry(t, db, layout.ServiceUser)
 		}
 	}
-	_ = os.Remove(t.Path(layout.SysusersFile))
+	for _, conf := range []string{layout.SysusersFile, layout.RuntimeSysusersFile} {
+		if _, err := t.Lstat(conf); err == nil {
+			_ = t.Remove(conf)
+		}
+	}
 }
 
 // dropEntry removes the "name:..." line from an account database file.
-func dropEntry(path, name string) error {
-	b, err := os.ReadFile(path)
+func dropEntry(t target.Target, path, name string) error {
+	b, err := t.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	fi, err := os.Stat(path)
+	fi, err := t.Lstat(path)
 	if err != nil {
 		return err
 	}
@@ -68,7 +79,7 @@ func dropEntry(path, name string) error {
 			kept = append(kept, l)
 		}
 	}
-	return fsutil.WriteFile(path, []byte(strings.Join(kept, "")), fi.Mode().Perm())
+	return t.WriteFile(path, []byte(strings.Join(kept, "")), fi.Mode().Perm())
 }
 
 // GroupID looks a group up in the target's /etc/group.
@@ -88,11 +99,11 @@ func GroupID(t target.Target, name string) (int, error) {
 	return 0, fmt.Errorf("group %q not found in %s", name, t.Path("/etc/group"))
 }
 
-// ChownToGroup gives path to root:gid. It only acts when running as root, so
+// ChownToGroup gives path (a path inside the target) to root:gid. It only acts when running as root, so
 // unprivileged test runs keep working.
-func ChownToGroup(path string, gid int) error {
+func ChownToGroup(t target.Target, path string, gid int) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	return os.Chown(path, 0, gid)
+	return t.Chown(path, 0, gid)
 }

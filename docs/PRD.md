@@ -294,6 +294,9 @@ Facts about the pinned Xray (v26.9.9) that shaped the code, verified against its
 - **Servers refuse private targets by default** (`freedom` blackholes loopback/private IPs behind a proxy inbound). This only matters for the local test server; the client's own `direct` outbound is unaffected, so LAN bypass works.
 - **Service account:** the first design used `DynamicUser` + `LoadCredential`. It works on real systems but not in rootless containers, LXC or similar, where the credentials mount fails. M1 uses a static `sneakernet` user from `systemd-sysusers`, which works everywhere systemd does and with `--root`.
 
+- **Read-only systemd and sysusers directories (NixOS):** `/etc/systemd/system` and `/etc/sysusers.d` can be links into the read-only Nix store. On the running system the unit then goes to `/run/systemd/system` (enabled with `--runtime`) and the user entry to `/run/sysusers.d`. Both last until reboot, and the installer says so. Note that on a read-only filesystem even deleting a missing file fails with EROFS, so cleanup checks for existence first.
+- **The `sneakernet` command on PATH:** linked in `/usr/local/bin` when that is on PATH; otherwise in the first writable, non-package-managed PATH directory. On NixOS that is `/run/wrappers/bin`, first on every PATH there and cleared on reboot or `nixos-rebuild`. If nothing fits, the installer prints the full path to use.
+
 Test layers that exist now:
 
 | Layer | What | Command |

@@ -21,6 +21,12 @@ url() { # name version file
     esac
 }
 
+if [ "$MODE" = fetch ] && ! command -v curl >/dev/null 2>&1; then
+    echo "error: curl not found. Install it, or run '$0 urls', download those" >&2
+    echo "       files by hand into .cache/deps and run '$0 verify'." >&2
+    exit 1
+fi
+
 status=0
 grep -vE '^[[:space:]]*(#|$)' "$ROOT/versions.lock" > "$DEPS/.lock"
 while read -r name ver arch file sum; do
@@ -29,7 +35,11 @@ while read -r name ver arch file sum; do
         fetch)
             if [ ! -f "$DEPS/$file" ]; then
                 echo "download $file ($arch)"
-                curl -fL --retry 5 --retry-delay 3 -C - -o "$DEPS/$file.part" "$(url "$name" "$ver" "$file")"
+                curl -fL --retry 5 --retry-delay 3 -C - -o "$DEPS/$file.part" "$(url "$name" "$ver" "$file")" || {
+                    echo "error: download of $file failed. If GitHub is blocked here, fetch the" >&2
+                    echo "       URLs from '$0 urls' another way and put the files in .cache/deps." >&2
+                    exit 1
+                }
                 mv "$DEPS/$file.part" "$DEPS/$file"
             fi ;;
         verify) ;;
@@ -45,4 +55,7 @@ while read -r name ver arch file sum; do
     echo "ok        $file"
 done < "$DEPS/.lock"
 rm -f "$DEPS/.lock"
+if [ "$status" -ne 0 ] && [ "$MODE" != urls ]; then
+    echo "Some files are missing or damaged. Delete the bad ones from .cache/deps and run 'make fetch' again." >&2
+fi
 exit "$status"
