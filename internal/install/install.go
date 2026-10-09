@@ -16,7 +16,6 @@ import (
 
 	"github.com/AliSohani2082/sneakernet/internal/bundle"
 	"github.com/AliSohani2082/sneakernet/internal/detect"
-	"github.com/AliSohani2082/sneakernet/internal/fsutil"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/links"
 	"github.com/AliSohani2082/sneakernet/internal/manage"
@@ -76,36 +75,49 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		Dirs:        []string{layout.OptDir, layout.EtcDir, layout.VarDir},
 	}
 
+	// Managed directories must be real, root-owned and not writable by
+	// others: we are about to put privileged executables in them.
 	for _, d := range []struct {
 		path string
 		perm os.FileMode
-	}{{layout.BinDir, 0o755}, {layout.AssetDir, 0o755}, {layout.EtcDir, 0o700}, {layout.VarDir, 0o755}} {
-		if err := os.MkdirAll(t.Path(d.path), d.perm); err != nil {
+	}{{layout.OptDir, 0o755}, {layout.BinDir, 0o755}, {layout.AssetDir, 0o755}, {layout.EtcDir, 0o700}, {layout.VarDir, 0o755}} {
+		if err := t.EnsureDir(d.path, d.perm); err != nil {
 			return nil, err
 		}
+	}
+
+	// Copy the payload into a private directory and check those bytes; only
+	// the staged files are installed or executed from here on.
+	stage, err := o.Bundle.Stage("")
+	if err != nil {
+		return nil, err
+	}
+	defer stage.Cleanup()
+	if err := stage.Verify(); err != nil {
+		return nil, err
 	}
 	copies := []struct {
 		src, dst string
 		perm     os.FileMode
 	}{
-		{o.Bundle.XrayBin(), layout.XrayBin, 0o755},
-		{o.Bundle.SelfBin(), layout.SelfBin, 0o755},
+		{stage.XrayBin(), layout.XrayBin, 0o755},
+		{stage.SelfBin(), layout.SelfBin, 0o755},
 	}
 	for _, g := range layout.GeoFiles {
 		copies = append(copies, struct {
 			src, dst string
 			perm     os.FileMode
-		}{filepath.Join(o.Bundle.AssetDir(), g), filepath.Join(layout.AssetDir, g), 0o644})
+		}{filepath.Join(stage.AssetDir(), g), filepath.Join(layout.AssetDir, g), 0o644})
 	}
 	for _, c := range copies {
 		log("copy %s", c.dst)
-		if err := fsutil.CopyFile(c.src, t.Path(c.dst), c.perm); err != nil {
+		if err := t.CopyFile(c.src, c.dst, c.perm); err != nil {
 			return nil, fmt.Errorf("copy %s: %w", c.dst, err)
 		}
 		m.Files = append(m.Files, c.dst)
 	}
 	log("write %s", layout.ServersFile)
-	if err := fsutil.WriteFile(t.Path(layout.ServersFile), o.Servers, 0o600); err != nil {
+	if err := t.WriteFile(layout.ServersFile, o.Servers, 0o600); err != nil {
 		return nil, err
 	}
 	m.Files = append(m.Files, layout.ServersFile)
@@ -117,10 +129,10 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 			return nil, fmt.Errorf("create service user: %w", err)
 		}
 		m.Files = append(m.Files, layout.SysusersFile)
-		if err := os.Chmod(t.Path(layout.EtcDir), 0o750); err != nil {
+		if err := t.Chmod(layout.EtcDir, 0o750); err != nil {
 			return nil, err
 		}
-		if err := service.ChownToGroup(t.Path(layout.EtcDir), gid); err != nil {
+		if err := service.ChownToGroup(t, layout.EtcDir, gid); err != nil {
 			return nil, err
 		}
 	}
@@ -139,7 +151,7 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 		}
 	}
 
-	mgr := &manage.Manager{T: t, Svc: o.Svc}
+	mgr := &manage.Manager{T: t, Svc: o.Svc, XrayBin: stage.XrayBin(), AssetDir: stage.AssetDir()}
 	servers, _, err := mgr.Servers()
 	if err != nil {
 		return nil, err
@@ -190,7 +202,7 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := fsutil.WriteFile(t.Path(layout.ManifestFile), append(b, '\n'), 0o644); err != nil {
+	if err := t.WriteFile(layout.ManifestFile, append(b, '\n'), 0o644); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -271,19 +283,18 @@ func writableDir(dir string) bool {
 // not create.
 func linkCommand(t target.Target, link string) error {
 	path := link
-	link = t.Path(link)
-	if fi, err := os.Lstat(link); err == nil {
+	if fi, err := t.Lstat(link); err == nil {
 		if fi.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("%s exists and is not a symlink", path)
 		}
-		if err := os.Remove(link); err != nil {
+		if err := t.Remove(link); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+	if err := t.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		return err
 	}
-	return os.Symlink(layout.SelfBin, link)
+	return t.Symlink(layout.SelfBin, link)
 }
 
 // restoreSELinuxLabels gives copied files the default labels for their paths
@@ -310,7 +321,7 @@ func Uninstall(t target.Target, svc service.Manager, log func(string, ...any)) e
 		log = func(string, ...any) {}
 	}
 	m := Manifest{Links: []string{layout.CommandLink}, Units: []string{layout.UnitName}}
-	if b, err := os.ReadFile(t.Path(layout.ManifestFile)); err == nil {
+	if b, err := t.ReadFile(layout.ManifestFile); err == nil {
 		if err := json.Unmarshal(b, &m); err != nil {
 			return fmt.Errorf("%s: %w", layout.ManifestFile, err)
 		}
@@ -335,16 +346,15 @@ func Uninstall(t target.Target, svc service.Manager, log func(string, ...any)) e
 		}
 	}
 	for _, l := range m.Links {
-		p := t.Path(l)
-		if dst, err := os.Readlink(p); err == nil && dst == layout.SelfBin {
+		if dst, err := t.Readlink(l); err == nil && dst == layout.SelfBin {
 			log("remove %s", l)
-			errs = append(errs, os.Remove(p))
+			errs = append(errs, t.Remove(l))
 		}
 	}
 	// Only our own directories, whatever the manifest says.
 	for _, d := range []string{layout.OptDir, layout.EtcDir, layout.VarDir} {
 		log("remove %s", d)
-		errs = append(errs, os.RemoveAll(t.Path(d)))
+		errs = append(errs, t.RemoveAll(d))
 	}
 	return errors.Join(errs...)
 }

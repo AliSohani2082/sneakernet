@@ -285,3 +285,108 @@ func TestCommandDirOnDiskTargets(t *testing.T) {
 		t.Errorf("debian disk target: %q %v", dir, onPath)
 	}
 }
+
+// dummyBundle is a complete bundle with placeholder contents, for tests that
+// fail before Xray would run (so they need no Xray build).
+func dummyBundle(t *testing.T) *bundle.Bundle {
+	t.Helper()
+	dir := t.TempDir()
+	var sums strings.Builder
+	for _, rel := range []string{"bin/amd64/xray", "bin/amd64/sneakernet", "data/geoip.dat", "data/geosite.dat"} {
+		data := []byte("content of " + rel)
+		p := filepath.Join(dir, rel)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, data, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		h := sha256.Sum256(data)
+		sums.WriteString(hex.EncodeToString(h[:]) + "  " + rel + "\n")
+	}
+	os.WriteFile(filepath.Join(dir, bundle.SumsFile), []byte(sums.String()), 0o644)
+	b, err := bundle.Open(dir, "amd64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestInstallRefusesSymlinkedTargetDirectory(t *testing.T) {
+	for _, link := range []string{"opt", "etc", "var"} {
+		host := t.TempDir() // stands in for the real /opt, /etc, /var
+		root := t.TempDir()
+		if err := os.Symlink(host, filepath.Join(root, link)); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Install(context.Background(), Options{
+			Bundle: dummyBundle(t), Target: target.Dir(root), State: manage.DefaultState(), Servers: nil,
+		})
+		if err == nil {
+			t.Fatalf("%s symlinked out of the target: install succeeded", link)
+		}
+		if ents, _ := os.ReadDir(host); len(ents) != 0 {
+			t.Errorf("%s: wrote outside the target root: %v", link, ents)
+		}
+	}
+}
+
+func TestInstallRefusesSymlinkedManagedDirectory(t *testing.T) {
+	// <root>/opt/sneakernet is a symlink to another place inside the root.
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "opt", "elsewhere"), 0o755)
+	if err := os.Symlink("elsewhere", filepath.Join(root, "opt", "sneakernet")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(context.Background(), Options{Bundle: dummyBundle(t), Target: target.Dir(root), State: manage.DefaultState()})
+	if err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+		t.Fatalf("want a clear refusal, got %v", err)
+	}
+}
+
+func TestInstallRefusesWritableManagedDirectory(t *testing.T) {
+	for _, mode := range []os.FileMode{0o775, 0o757} {
+		root := t.TempDir()
+		bin := filepath.Join(root, "opt/sneakernet/bin")
+		os.MkdirAll(bin, 0o755)
+		os.Chmod(bin, mode)
+		_, err := Install(context.Background(), Options{Bundle: dummyBundle(t), Target: target.Dir(root), State: manage.DefaultState()})
+		if err == nil || !strings.Contains(err.Error(), "writable by group or others") {
+			t.Fatalf("mode %o: want a clear refusal, got %v", mode, err)
+		}
+		if _, err := os.Stat(filepath.Join(bin, "xray")); err == nil {
+			t.Errorf("mode %o: a binary was installed into the unsafe directory", mode)
+		}
+	}
+}
+
+func TestInstallRejectsIncompleteBundleBeforeTouchingFiles(t *testing.T) {
+	b := dummyBundle(t)
+	sums, _ := os.ReadFile(filepath.Join(b.Dir, bundle.SumsFile))
+	var keep []string
+	for _, l := range strings.Split(strings.TrimSpace(string(sums)), "\n") {
+		if !strings.HasSuffix(l, "bin/amd64/xray") {
+			keep = append(keep, l)
+		}
+	}
+	os.WriteFile(filepath.Join(b.Dir, bundle.SumsFile), []byte(strings.Join(keep, "\n")+"\n"), 0o644)
+	root := t.TempDir()
+	_, err := Install(context.Background(), Options{Bundle: b, Target: target.Dir(root), State: manage.DefaultState()})
+	if err == nil || !strings.Contains(err.Error(), "bin/amd64/xray") {
+		t.Fatalf("want an incomplete-bundle error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "opt/sneakernet/bin/sneakernet")); err == nil {
+		t.Error("files were copied from an incomplete bundle")
+	}
+}
+
+func TestInstallCopiesStagedBytesNotLaterStickContents(t *testing.T) {
+	b := dummyBundle(t)
+	// The stick is changed after Open/Verify but before Install: it must fail.
+	os.WriteFile(filepath.Join(b.Dir, "bin/amd64/sneakernet"), []byte("replaced on the stick"), 0o755)
+	root := t.TempDir()
+	if _, err := Install(context.Background(), Options{Bundle: b, Target: target.Dir(root), State: manage.DefaultState()}); err == nil {
+		t.Fatal("install accepted a file that no longer matches SHA256SUMS")
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "opt/sneakernet/bin/sneakernet")); err == nil {
+		t.Errorf("mutated binary installed: %q", got)
+	}
+}

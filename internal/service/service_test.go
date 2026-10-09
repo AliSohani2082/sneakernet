@@ -227,3 +227,41 @@ func TestReadOnlySysusersDirFallsBackToRun(t *testing.T) {
 		t.Errorf("runtime sysusers entry left behind")
 	}
 }
+
+func TestUnitWriteDoesNotFollowSymlinks(t *testing.T) {
+	root := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	os.WriteFile(victim, []byte("precious"), 0o644)
+	unitDir := filepath.Join(root, "etc/systemd/system")
+	os.MkdirAll(unitDir, 0o755)
+	// A planted final symlink: os.WriteFile would truncate the victim.
+	if err := os.Symlink(victim, filepath.Join(unitDir, layout.UnitName)); err != nil {
+		t.Fatal(err)
+	}
+	s := &Systemd{T: target.Target{Root: root, Running: true}, Run: (&recorder{}).run}
+	if err := s.Install(layout.UnitName, XrayUnit()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "precious" {
+		t.Errorf("the symlink target was overwritten: %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(unitDir, layout.UnitName)); string(b) != string(XrayUnit()) {
+		t.Error("unit not written")
+	}
+}
+
+func TestUnitWriteRefusesSymlinkedParentOutOfRoot(t *testing.T) {
+	root := t.TempDir()
+	host := t.TempDir()
+	os.MkdirAll(filepath.Join(root, "etc"), 0o755)
+	if err := os.Symlink(host, filepath.Join(root, "etc", "systemd")); err != nil {
+		t.Fatal(err)
+	}
+	s := &Systemd{T: target.Dir(root), Run: (&recorder{}).run}
+	if err := s.Install(layout.UnitName, XrayUnit()); err == nil {
+		t.Fatal("unit written through a symlinked parent")
+	}
+	if ents, _ := os.ReadDir(host); len(ents) != 0 {
+		t.Errorf("wrote outside the root: %v", ents)
+	}
+}

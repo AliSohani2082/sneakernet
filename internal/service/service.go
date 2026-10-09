@@ -102,11 +102,11 @@ func (s *Systemd) systemctl(args ...string) ([]byte, error) {
 // read-only (NixOS links it into the Nix store) and the target is the running
 // system, the unit goes to /run/systemd/system instead, for this boot only.
 func (s *Systemd) Install(name string, unit []byte) error {
-	err := writeFile(s.unitPath(name), unit)
+	err := s.writeUnit(filepath.Join(layout.UnitDir, name), unit)
 	if err != nil && s.T.Running && ReadOnly(err) {
-		err = writeFile(s.runtimePath(name), unit)
+		err = s.writeUnit(filepath.Join(layout.RuntimeUnitDir, name), unit)
 	} else if err == nil {
-		_ = os.Remove(s.runtimePath(name)) // a writable /etc wins over an old runtime copy
+		_ = s.T.Remove(filepath.Join(layout.RuntimeUnitDir, name)) // a writable /etc wins over an old runtime copy
 	}
 	if err != nil {
 		return err
@@ -118,11 +118,11 @@ func (s *Systemd) Install(name string, unit []byte) error {
 	return nil
 }
 
-func writeFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
+// writeUnit replaces the unit atomically and never writes through a symlink
+// (a planted unit -> /etc/shadow would otherwise be truncated), and stays
+// inside the target root.
+func (s *Systemd) writeUnit(path string, data []byte) error {
+	return s.T.WriteFile(path, data, 0o644)
 }
 
 // ReadOnly reports whether err means a file could not be written because
@@ -166,13 +166,13 @@ func (s *Systemd) Remove(name string) error {
 	default:
 		_, _ = s.systemctl("disable", "--runtime", "--now", name)
 	}
-	for _, p := range []string{s.unitPath(name), s.runtimePath(name)} {
+	for _, p := range []string{filepath.Join(layout.UnitDir, name), filepath.Join(layout.RuntimeUnitDir, name)} {
 		// Check first: on a read-only filesystem even removing a missing
 		// file fails (EROFS), not just with "not found".
-		if _, err := os.Lstat(p); err != nil {
+		if _, err := s.T.Lstat(p); err != nil {
 			continue
 		}
-		if err := os.Remove(p); err != nil {
+		if err := s.T.Remove(p); err != nil {
 			return err
 		}
 	}

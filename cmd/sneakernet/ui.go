@@ -90,14 +90,15 @@ func (u *ui) ask(question, def string) (string, error) {
 	return s, nil
 }
 
-// readLine reads one line of input without a prompt.
+// readLine reads one line of input without a prompt. The text is not logged.
 func (u *ui) readLine() (string, error) {
 	s, err := u.in.ReadString('\n')
 	if err != nil && (err != io.EOF || s == "") {
 		return "", errInputClosed
 	}
 	s = strings.TrimSpace(s)
-	fmt.Fprintf(u.log, "%s\n", s)
+	// Pasted share links carry UUIDs and passwords: never copy them to the log.
+	fmt.Fprintf(u.log, "(input line, %d characters, not logged)\n", len(s))
 	return s, nil
 }
 

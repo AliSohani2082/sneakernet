@@ -59,6 +59,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if *skipVerify {
+		b.SkipVerify = true
 		u.warn("skipping the bundle checksum check")
 	} else {
 		u.step("Checking the files on the stick")
@@ -74,10 +75,12 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if *root == "" {
-		if f, err := os.OpenFile(layout.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		if f, err := openLogFile(layout.LogFile); err == nil {
 			defer f.Close()
 			u.log = f
 			fmt.Fprintf(f, "\n--- sneakernet %s install, %s\n", version, time.Now().Format(time.RFC3339))
+		} else {
+			u.warn("not writing %s: %v", layout.LogFile, err)
 		}
 	}
 	host, _ := detect.ReadOS(e.t.Root)

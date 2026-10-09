@@ -7,7 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AliSohani2082/sneakernet/internal/fsutil"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/target"
 )
@@ -25,10 +24,10 @@ func EnsureUser(t target.Target, run Runner) (int, error) {
 		run = execRunner
 	}
 	conf := layout.SysusersFile
-	err := fsutil.WriteFile(t.Path(conf), []byte(sysusersConf), 0o644)
+	err := t.WriteFile(conf, []byte(sysusersConf), 0o644)
 	if err != nil && t.Running && ReadOnly(err) {
 		conf = layout.RuntimeSysusersFile
-		err = fsutil.WriteFile(t.Path(conf), []byte(sysusersConf), 0o644)
+		err = t.WriteFile(conf, []byte(sysusersConf), 0o644)
 	}
 	if err != nil {
 		return 0, err
@@ -54,23 +53,23 @@ func RemoveUser(t target.Target, run Runner) {
 		_, _ = run("userdel", layout.ServiceUser)
 	} else {
 		for _, db := range []string{"/etc/passwd", "/etc/group", "/etc/shadow", "/etc/gshadow"} {
-			_ = dropEntry(t.Path(db), layout.ServiceUser)
+			_ = dropEntry(t, db, layout.ServiceUser)
 		}
 	}
 	for _, conf := range []string{layout.SysusersFile, layout.RuntimeSysusersFile} {
-		if _, err := os.Lstat(t.Path(conf)); err == nil {
-			_ = os.Remove(t.Path(conf))
+		if _, err := t.Lstat(conf); err == nil {
+			_ = t.Remove(conf)
 		}
 	}
 }
 
 // dropEntry removes the "name:..." line from an account database file.
-func dropEntry(path, name string) error {
-	b, err := os.ReadFile(path)
+func dropEntry(t target.Target, path, name string) error {
+	b, err := t.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	fi, err := os.Stat(path)
+	fi, err := t.Lstat(path)
 	if err != nil {
 		return err
 	}
@@ -80,7 +79,7 @@ func dropEntry(path, name string) error {
 			kept = append(kept, l)
 		}
 	}
-	return fsutil.WriteFile(path, []byte(strings.Join(kept, "")), fi.Mode().Perm())
+	return t.WriteFile(path, []byte(strings.Join(kept, "")), fi.Mode().Perm())
 }
 
 // GroupID looks a group up in the target's /etc/group.
@@ -100,11 +99,11 @@ func GroupID(t target.Target, name string) (int, error) {
 	return 0, fmt.Errorf("group %q not found in %s", name, t.Path("/etc/group"))
 }
 
-// ChownToGroup gives path to root:gid. It only acts when running as root, so
+// ChownToGroup gives path (a path inside the target) to root:gid. It only acts when running as root, so
 // unprivileged test runs keep working.
-func ChownToGroup(path string, gid int) error {
+func ChownToGroup(t target.Target, path string, gid int) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	return os.Chown(path, 0, gid)
+	return t.Chown(path, 0, gid)
 }
