@@ -90,22 +90,50 @@ Afterwards (the stick can be unplugged):
 | `sudo sneakernet doctor` | Diagnose the installation |
 | `sudo sneakernet uninstall` | Remove everything |
 
+`sneakernet help <command>` (or `<command> -h`) shows examples and flags. Unknown commands get a "did you mean" hint. Results go to stdout; progress, warnings and errors go to stderr, so `sneakernet list > servers.txt` stays clean.
+
+**Global flags** (anywhere on the line):
+
+| Flag | Effect |
+|---|---|
+| `--color auto\|always\|never`, `--no-color` | `auto` (default) colors only on a terminal, and not when `NO_COLOR` is set (any non-empty value) or `TERM=dumb`. `SNEAKERNET_COLOR` sets the default. The choice is kept when the command re-runs itself under `sudo`, which drops `NO_COLOR`. The TUI follows the same rule. |
+| `--no-input` | Never ask a question. A command that would ask fails with exit code 2 and names the flag to pass instead. Questions are also never asked when stdin is not a terminal. Use `--yes` to accept the defaults. |
+| `--ascii` | Plain ASCII symbols in the TUI (no braille, arrows, bullets or emoji; flags become `[DE]`). Chosen automatically when `TERM=linux`, the locale is not UTF-8, or `SNEAKERNET_ASCII` is set. |
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | the operation failed |
+| `2` | usage error: bad flag, wrong arguments, unknown command, or a question that cannot be asked (see `--no-input`) |
+| `3` | sneakernet is not installed here |
+| `4` | root is needed and `sudo` is not available |
+| `5` | no connectivity through the proxy (`test`, `status --check`, and `doctor` when that is the only problem) |
+| `130` | interrupted (Ctrl-C) |
+
+After an install, the installer prints the same install as one command (`sudo sh …/install.sh --yes --server auto --routing …`) so the next run needs no questions.
+
 ### The search menu (`sudo sneakernet tui`)
 
 Start typing and the list filters live. Matches in the server **name** come first, then matches in other properties (protocol, transport, security, host, SNI, port, path…). Matched letters are highlighted, and small typos still match (`grmny` finds "Germany"). `field:value` narrows to one property: `sec:reality`, `proto:vless`, `port:443`, `host:example.com`, `sni:apple`.
 
 | Key | Action |
 |---|---|
-| type / `esc` | search / clear the search (`esc` again quits) |
+| `F1` or `^g` | help: every key, the search syntax and the matching commands |
+| type / `esc` | search / clear the search (`esc` again quits). While a test or switch runs, `esc` cancels it |
 | `↑` `↓` `pgup` `pgdn` | move |
 | `enter` | use the selected server |
-| `^t` | test the speed of every server in the results (one Xray process, all in parallel) |
-| `^b` | use the fastest server in the results (tests them first if needed) |
-| `^a` | auto mode: Xray keeps measuring all servers and uses the fastest |
-| `^n` | add servers: paste links, see a live preview, `^s` to save |
-| `^x` | remove the selected server (asks first) |
+| `^t` / `F5` | test the speed of every server in the results (one Xray process, all in parallel) |
+| `^b` / `F6` | use the fastest server in the results (tests them first if needed) |
+| `^a` / `F7` | auto mode: Xray keeps measuring all servers and uses the fastest |
+| `^n` / `F2` | add servers: paste links, see a live preview, `^s` to save (`esc` asks before discarding pasted links) |
+| `^x` / `F8` | remove the selected server (asks first) |
 | `^o` | sort by relevance or speed |
-| `^l` `^r` `^s` | logs · restart · start/stop |
+| `^l` / `F3`, `^r`, `^s` | logs · restart · start/stop |
+| `^c` / `F10` | quit |
+
+The F-keys are for tmux/screen, where `^b` and `^a` are the multiplexer's prefix, and for terminals where ctrl chords are taken. The bare Linux console sends `F1`–`F5` in a form the TUI does not decode, so there the key bar shows `^g` for help; the ctrl chords always work. The key bar only lists what works right now. Prefer a screen reader or plain output? Every action also has a command: `list`, `switch`, `test --all`, `add`, `remove`, `status`.
 
 With no servers yet, the TUI opens straight into the add screen. Pasting links into the search box opens it too. "Speed" is the time to fetch a small page through each server, the same "real delay" v2rayN shows.
 

@@ -86,11 +86,19 @@ func fixture(t *testing.T) string {
 
 func newTestModel(t *testing.T, mgr *manage.Manager) *model {
 	t.Helper()
-	m, err := newModel(context.Background(), mgr)
+	return newSizedModel(t, mgr, Options{}, 120, 30)
+}
+
+// newSizedModel builds a model of a given size. Messages do not fade: the
+// test helpers would otherwise wait for the timers.
+func newSizedModel(t *testing.T, mgr *manage.Manager, opts Options, w, h int) *model {
+	t.Helper()
+	m, err := newModel(context.Background(), mgr, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m.msgTTL = 0
+	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	return m
 }
 

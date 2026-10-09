@@ -47,6 +47,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 
+	u.showBanner(u.out)
 	u.printf("\n%s %s — offline Xray installer\n", u.bold("sneakernet"), version)
 
 	// 1. Bundle
@@ -463,7 +464,7 @@ func checkConnection(ctx context.Context, u *ui, st manage.State) bool {
 		}
 	}
 	u.warn("no connection through the proxy yet: %v", r.Err)
-	u.printf("     %s\n", u.dim("try another server:  sudo sneakernet tui   (press T to test them all)"))
+	u.notef("     try another server:  sudo sneakernet tui   (press ^t to test them all)")
 	return false
 }
 
@@ -484,6 +485,7 @@ func printSummary(u *ui, st manage.State, command string, connected, live bool) 
 	writeProxyExports(w, st)
 	fmt.Fprintf(w, "  Manage it:      sudo %s tui\n", command)
 	fmt.Fprintf(w, "                  %s status | switch | test | uninstall\n", command)
+	u.printf("\n  Next time, skip the questions:\n    %s\n", reinstallCommand(u.args, st))
 	if live {
 		fmt.Fprintln(w, "\n  Live session: this is gone after a reboot unless Ventoy persistence is set up.")
 	}
