@@ -32,14 +32,41 @@ if [ ! -f "$SRC" ]; then
     exit 1
 fi
 
-# Find a temp dir we may execute from (/tmp is noexec on some systems).
+# The sha256 SHA256SUMS lists for this CPU's binary. This catches a damaged or
+# half-copied stick before anything runs as root. It does NOT stop a malicious
+# stick: SHA256SUMS lives on the same media as the binary (see docs/SECURITY.md).
+SUMS="$BUNDLE/SHA256SUMS"
+if ! command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum is required to check the stick before running it (coreutils)." >&2
+    exit 1
+fi
+[ -f "$SUMS" ] || { echo "This is not a complete Sneakernet folder: SHA256SUMS is missing." >&2; exit 1; }
+WANT=$(awk -v p="bin/$ARCH/sneakernet" '$2 == p || $2 == "*" p { print $1; exit }' "$SUMS")
+case "$WANT" in
+    *[!0-9a-f]*|"") echo "SHA256SUMS has no valid entry for bin/$ARCH/sneakernet; re-copy the folder to the stick." >&2; exit 1 ;;
+esac
+[ "${#WANT}" -eq 64 ] || { echo "SHA256SUMS has a malformed entry for bin/$ARCH/sneakernet." >&2; exit 1; }
+
+# Find a temp dir we may execute from (/tmp is noexec on some systems). The
+# checksum is taken from the private copy that is then executed, not from the
+# stick, so the stick cannot change between the check and the run.
 WORK=""
 for d in "${TMPDIR:-/tmp}" /tmp /var/tmp /run /dev/shm; do
     [ -d "$d" ] || continue
     w=$(mktemp -d "$d/sneakernet.XXXXXX" 2>/dev/null) || continue
-    if cp "$SRC" "$w/sneakernet" && chmod 0755 "$w/sneakernet" && "$w/sneakernet" version >/dev/null 2>&1; then
-        WORK=$w
-        break
+    if cp "$SRC" "$w/sneakernet" && chmod 0755 "$w/sneakernet"; then
+        GOT=$(sha256sum "$w/sneakernet" | awk '{ print $1 }')
+        if [ "$GOT" != "$WANT" ]; then
+            rm -rf "$w"
+            echo "bin/$ARCH/sneakernet does not match SHA256SUMS: the stick is damaged. Re-copy the folder and try again." >&2
+            exit 1
+        fi
+        if "$w/sneakernet" version >/dev/null 2>&1; then
+            WORK=$w
+            TMPDIR=$d   # staged files are executed too, so use a dir that allows it
+            export TMPDIR
+            break
+        fi
     fi
     rm -rf "$w"
 done

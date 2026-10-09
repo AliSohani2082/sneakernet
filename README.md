@@ -58,7 +58,7 @@ On a heavily filtered network, a fresh Linux install can't reach the open intern
 - **Auto-detection** of distro, CPU architecture (amd64, arm64, 386, armv7), libc and init system.
 - **Preset servers**, with automatic failover to the fastest working one (passphrase encryption on the stick: planned).
 - **systemd service** running as an unprivileged user (system-wide proxy and TUN mode: planned).
-- **Integrity checks:** every file is checked against `SHA256SUMS` before anything is installed (signatures: planned).
+- **Integrity checks:** every file is checked against `SHA256SUMS` before anything is installed, and only the checked copies are installed or run. This catches a damaged or half-copied stick, **not a malicious one**: the checksums sit on the same stick. See [Security notes](docs/SECURITY.md); signatures are planned.
 - **Clean uninstall** from an install manifest.
 
 Supported distros: Debian, Ubuntu, Mint, Fedora, RHEL, Arch, Manjaro, CachyOS and openSUSE.
@@ -190,6 +190,7 @@ user, traffic through the proxy, switching servers and uninstall.
 
 - [Product requirements (PRD)](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Security notes](docs/SECURITY.md)
 
 ## Status
 

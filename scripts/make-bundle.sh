@@ -65,9 +65,11 @@ fi
 install -m 0644 "$ROOT/bootstrap/install.sh" "$ROOT/bootstrap/uninstall.sh" "$ROOT/bootstrap/README.txt" "$OUT/"
 echo "$VERSION" > "$OUT/VERSION"
 
-# Checksums of the payload (paths relative to the bundle). servers.txt is
-# left out on purpose: users edit it on the stick.
-(cd "$OUT" && find bin data -type f | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+# Checksums of the payload and the shell scripts (paths relative to the
+# bundle). servers.txt is left out on purpose: users edit it on the stick.
+# These sums detect corruption only: they sit on the same media as the files
+# they list, so someone who can rewrite the stick can rewrite them too.
+(cd "$OUT" && { find bin data -type f; echo install.sh; echo uninstall.sh; } | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
 
 echo "bundle $VERSION -> $OUT"
 du -sh "$OUT"
