@@ -3,10 +3,12 @@ package xrayconf
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AliSohani2082/sneakernet/internal/links"
 )
@@ -104,6 +106,24 @@ func TestValidateReportsXrayError(t *testing.T) {
 	err := Validate(context.Background(), bin, assets, bad)
 	if err == nil || !strings.Contains(err.Error(), "xray rejected the config") {
 		t.Fatalf("want xray error, got %v", err)
+	}
+}
+
+// A cancel kills Xray mid-test. Validate must say "cancelled" (an error that
+// matches context.Canceled), not report the killed process as a rejected config.
+func TestValidateReportsCancellation(t *testing.T) {
+	fake := filepath.Join(t.TempDir(), "xray")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	err := Validate(ctx, fake, t.TempDir(), []byte(`{}`))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if strings.Contains(err.Error(), "rejected") {
+		t.Errorf("a cancel is not a rejected config: %v", err)
 	}
 }
 

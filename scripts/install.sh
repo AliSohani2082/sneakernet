@@ -71,6 +71,9 @@ verify_bundle() {
             printf 'MISMATCH  %s\n' "$path" >&2; bad=1
         fi
     done < "$1/SHA256SUMS"
+    [ "$n" -gt 0 ] || { printf 'EMPTY     SHA256SUMS\n' >&2; return 1; }
+    grep -q '[[:space:]]install\.sh$' "$1/SHA256SUMS" ||
+        { printf 'UNLISTED  install.sh\n' >&2; return 1; }
     [ "$bad" -eq 0 ] || return 1
     say "verified $n files in $1"
 }
@@ -92,7 +95,9 @@ fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/sneakernet-get.XXXXXX")
 stage="$to/.sneakernet.new"
-trap 'rm -rf "$work" "$stage"' EXIT INT TERM
+old="$to/.sneakernet.old"
+trap 'rm -rf "$work" "$stage"' EXIT
+trap 'exit 130' INT TERM
 
 # Resolve the source to a bundle folder.
 if [ -n "$from" ] && [ -d "$from" ]; then
@@ -142,12 +147,18 @@ say "copy to $to/sneakernet"
 rm -rf "$stage"
 cp -R "$src" "$stage"
 verify_bundle "$stage" || die "the copy on the stick does not match. The stick may be failing; try another one"
+# A run interrupted mid-swap leaves the previous install in $old: put it back.
+if [ ! -e "$to/sneakernet" ] && [ -e "$old" ]; then mv "$old" "$to/sneakernet"; fi
 if [ -f "$to/sneakernet/servers.txt" ]; then
     cp "$to/sneakernet/servers.txt" "$stage/servers.txt"
     say "kept your servers.txt"
 fi
-rm -rf "$to/sneakernet"
+# Move the old folder aside instead of deleting it, so an interrupted swap
+# never leaves the stick without a copy (and without the user's servers.txt).
+rm -rf "$old"
+if [ -e "$to/sneakernet" ]; then mv "$to/sneakernet" "$old"; fi
 mv "$stage" "$to/sneakernet"
+rm -rf "$old"
 sync
 
 say ""

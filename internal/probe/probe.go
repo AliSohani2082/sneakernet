@@ -118,6 +118,8 @@ func All(ctx context.Context, xrayBin, assetDir string, servers []links.Server, 
 	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetDir)
 	out := &tailBuffer{max: 16 << 10}
 	cmd.Stdout, cmd.Stderr = out, out
+	// A child that inherited the pipes could keep Wait blocked after Xray is killed.
+	cmd.WaitDelay = 2 * time.Second
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}

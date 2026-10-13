@@ -124,11 +124,11 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 
 	if o.Svc != nil {
 		log("create the %s system user", layout.ServiceUser)
-		gid, err := service.EnsureUser(t, nil)
+		gid, sysusers, err := service.EnsureUser(t, nil)
 		if err != nil {
 			return nil, fmt.Errorf("create service user: %w", err)
 		}
-		m.Files = append(m.Files, layout.SysusersFile)
+		m.Files = append(m.Files, sysusers)
 		if err := t.Chmod(layout.EtcDir, 0o750); err != nil {
 			return nil, err
 		}

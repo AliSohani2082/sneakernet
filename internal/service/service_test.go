@@ -214,9 +214,12 @@ func TestReadOnlySysusersDirFallsBackToRun(t *testing.T) {
 	os.WriteFile(filepath.Join(root, "etc/group"), []byte("sneakernet:x:977:\n"), 0o644)
 	rec := &recorder{}
 	tg := target.Target{Root: root, Running: true}
-	gid, err := EnsureUser(tg, rec.run)
+	gid, written, err := EnsureUser(tg, rec.run)
 	if err != nil || gid != 977 {
 		t.Fatalf("gid=%d err=%v", gid, err)
+	}
+	if written != layout.RuntimeSysusersFile {
+		t.Errorf("reported sysusers entry %s, want %s", written, layout.RuntimeSysusersFile)
 	}
 	conf := filepath.Join(root, layout.RuntimeSysusersFile)
 	if got := strings.Join(rec.calls, "\n"); got != "systemd-sysusers "+conf {

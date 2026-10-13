@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -308,12 +310,34 @@ func TestEscCancelsSwitch(t *testing.T) {
 	if !strings.Contains(m.msg, "cancelled") || m.msgErr {
 		t.Errorf("a cancelled switch is not an error: %q (err %v)", m.msg, m.msgErr)
 	}
+	// Validate wraps the cancellation; that still counts as one.
+	ctx, _ = m.startBusy("switching")
+	press(m, tea.KeyEscape)
+	m.Update(switchedMsg{err: fmt.Errorf("config test cancelled: %w", ctx.Err())})
+	if !strings.Contains(m.msg, "cancelled") || m.msgErr {
+		t.Errorf("a wrapped cancellation is still a cancel: %q (err %v)", m.msg, m.msgErr)
+	}
 	// Removing is not cancellable: esc keeps its normal meaning.
 	m.startUncancellable("removing")
 	typeText(t, m, "x")
 	press(m, tea.KeyEscape)
 	if m.query.Value() != "" || m.cancelling {
 		t.Error("esc during an uncancellable operation clears the search as usual")
+	}
+}
+
+// Enable and Restart do not take the context, so esc pressed after the config
+// write must not hide their failure behind "the server was not changed".
+func TestEscDoesNotHideRestartFailure(t *testing.T) {
+	m := uxModel(t, Options{}, 100, 24)
+	m.startBusy("switching")
+	press(m, tea.KeyEscape)
+	m.Update(switchedMsg{err: errors.New("restart: unit failed")})
+	if !m.msgErr || !strings.Contains(m.msg, "switch failed") || !strings.Contains(m.msg, "unit failed") {
+		t.Errorf("the real error should show: %q (err %v)", m.msg, m.msgErr)
+	}
+	if strings.Contains(m.msg, "was not changed") {
+		t.Errorf("the server may have changed: %q", m.msg)
 	}
 }
 

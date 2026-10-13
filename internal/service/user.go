@@ -18,28 +18,33 @@ u ` + layout.ServiceUser + ` - "Sneakernet Xray client" - -
 // EnsureUser creates the service user with systemd-sysusers, which works
 // offline and against another root (--root). The entry goes to
 // /etc/sysusers.d, or to /run/sysusers.d when /etc/sysusers.d is read-only
-// on the running system (NixOS). It returns the user's group id.
-func EnsureUser(t target.Target, run Runner) (int, error) {
+// on the running system (NixOS). It returns the user's group id and the
+// sysusers entry it wrote.
+func EnsureUser(t target.Target, run Runner) (gid int, conf string, err error) {
 	if run == nil {
 		run = execRunner
 	}
-	conf := layout.SysusersFile
-	err := t.WriteFile(conf, []byte(sysusersConf), 0o644)
+	conf = layout.SysusersFile
+	err = t.WriteFile(conf, []byte(sysusersConf), 0o644)
 	if err != nil && t.Running && ReadOnly(err) {
 		conf = layout.RuntimeSysusersFile
 		err = t.WriteFile(conf, []byte(sysusersConf), 0o644)
 	}
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	args := []string{}
 	if !t.Running {
 		args = append(args, "--root="+t.Root)
 	}
 	if _, err := run("systemd-sysusers", append(args, t.Path(conf))...); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	return GroupID(t, layout.ServiceUser)
+	gid, err = GroupID(t, layout.ServiceUser)
+	if err != nil {
+		return 0, "", err
+	}
+	return gid, conf, nil
 }
 
 // RemoveUser deletes the service user and its sysusers entry (best effort).

@@ -2,6 +2,7 @@ package xrayconf
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,6 +31,12 @@ func Validate(ctx context.Context, xrayBin, assetDir string, cfg []byte) error {
 	cmd.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+assetDir)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A cancelled context kills Xray ("signal: killed"); say what happened
+		// so callers can tell a cancel from a rejected config. A timeout stays
+		// a failure.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return fmt.Errorf("config test cancelled: %w", context.Canceled)
+		}
 		return fmt.Errorf("xray rejected the config: %s", xrayError(out, err))
 	}
 	return nil

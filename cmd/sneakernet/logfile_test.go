@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestPastedLinksNeverReachTheLog(t *testing.T) {
@@ -63,5 +65,28 @@ func TestOpenLogFileTightensAndRefusesSymlinks(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(victim); string(b) != "keep" {
 		t.Errorf("symlink target was modified: %q", b)
+	}
+}
+
+func TestOpenLogFileDoesNotBlockOnFIFO(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "install.log")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skipf("mkfifo unavailable: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		f, err := openLogFile(p)
+		if err == nil {
+			f.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a FIFO log must be refused")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("openLogFile blocked on a FIFO with no reader")
 	}
 }

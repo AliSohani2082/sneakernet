@@ -7,6 +7,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -635,7 +636,9 @@ func (m *model) onSwitched(msg switchedMsg) (tea.Model, tea.Cmd) {
 		m.state = saved
 	}
 	if msg.err != nil {
-		if cancelled {
+		// Enable and Restart do not take the context, so after the config
+		// write a failure there is a real error even if esc was pressed.
+		if cancelled && errors.Is(msg.err, context.Canceled) {
 			m.setMsg(false, "cancelled — the server was not changed")
 		} else {
 			m.setMsg(true, "switch failed: %v", msg.err)

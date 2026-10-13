@@ -372,11 +372,11 @@ Keep stdout limited to the JSON document. Diagnostics go to stderr (R12). Sugges
 
 ```go
 type statusJSON struct {
-	Service  struct{ State string `json:"state"`; Active, Enabled bool; Since string } `json:"service"`
+	Service  struct{ State string `json:"state"`; Active bool `json:"active"`; Enabled bool `json:"enabled"`; Since string `json:"since"` } `json:"service"`
 	Server   struct{ Auto bool `json:"auto"`; Index int `json:"index,omitempty"`; Name string `json:"name,omitempty"` } `json:"server"`
 	Routing  string `json:"routing"`; Region string `json:"region,omitempty"`
 	Socks    string `json:"socks"`; HTTP string `json:"http"`        // "127.0.0.1:10808"
-	Check    *struct{ OK bool; LatencyMS int64 `json:"latency_ms"`; Error string `json:"error,omitempty"` } `json:"check,omitempty"`
+	Check    *struct{ OK bool `json:"ok"`; LatencyMS int64 `json:"latency_ms"`; Error string `json:"error,omitempty"` } `json:"check,omitempty"`
 }
 // list:   [{"index":12,"name":"…","kind":"vless ws/tls","usable":true,"problem":"","active":false}]
 // test:   [{"index":12,"ok":true,"latency_ms":84}|{"index":3,"ok":false,"error":"timed out"}]
