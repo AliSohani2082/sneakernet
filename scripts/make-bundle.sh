@@ -22,7 +22,14 @@ ARCHES="${ARCHES:-amd64 arm64 386 armv7}"
 SERVERS="${SERVERS:-$ROOT/config/servers.txt}"
 VERSION="${VERSION:-$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo dev)}"
 
-sh "$ROOT/scripts/fetch-deps.sh" verify >/dev/null
+for tool in unzip sha256sum; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "error: $tool not found; install it (or run: nix develop)" >&2; exit 1; }
+done
+sh "$ROOT/scripts/fetch-deps.sh" verify >/dev/null || {
+    echo "error: the pinned Xray downloads in .cache/deps are missing or damaged (see above)." >&2
+    echo "       Run 'make fetch' once on a machine with internet." >&2
+    exit 1
+}
 
 zip_for() { awk -v a="$1" '$1 == "xray" && $3 == a { print $4 }' "$ROOT/versions.lock"; }
 
@@ -34,7 +41,7 @@ trap 'rm -rf "$work"' EXIT INT TERM
 for arch in $ARCHES; do
     zip=$(zip_for "$arch")
     [ -n "$zip" ] || { echo "no Xray artifact pinned for $arch" >&2; exit 1; }
-    [ -f "$ROOT/build/$arch/sneakernet" ] || { echo "missing build/$arch/sneakernet: run make build" >&2; exit 1; }
+    [ -f "$ROOT/build/$arch/sneakernet" ] || { echo "error: missing build/$arch/sneakernet: run make build" >&2; exit 1; }
     mkdir -p "$OUT/bin/$arch" "$work/$arch"
     unzip -q -o "$DEPS/$zip" -d "$work/$arch"
     install -m 0755 "$work/$arch/xray" "$OUT/bin/$arch/xray"
@@ -58,9 +65,11 @@ fi
 install -m 0644 "$ROOT/bootstrap/install.sh" "$ROOT/bootstrap/uninstall.sh" "$ROOT/bootstrap/README.txt" "$OUT/"
 echo "$VERSION" > "$OUT/VERSION"
 
-# Checksums of the payload (paths relative to the bundle). servers.txt is
-# left out on purpose: users edit it on the stick.
-(cd "$OUT" && find bin data -type f | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
+# Checksums of the payload and the shell scripts (paths relative to the
+# bundle). servers.txt is left out on purpose: users edit it on the stick.
+# These sums detect corruption only: they sit on the same media as the files
+# they list, so someone who can rewrite the stick can rewrite them too.
+(cd "$OUT" && { find bin data -type f; echo install.sh; echo uninstall.sh; } | LC_ALL=C sort | xargs sha256sum > SHA256SUMS)
 
 echo "bundle $VERSION -> $OUT"
 du -sh "$OUT"

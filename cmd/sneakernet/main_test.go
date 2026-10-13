@@ -77,11 +77,20 @@ func systemdRoot(t *testing.T) string {
 	return root
 }
 
+// sn runs the CLI with stdout and stderr in one buffer, so assertions see
+// what a user sees. snSplit keeps them apart.
 func sn(t *testing.T, stdin string, args ...string) (string, int) {
 	t.Helper()
 	var out bytes.Buffer
-	code := run(context.Background(), args, strings.NewReader(stdin), &out)
+	code := run(context.Background(), args, strings.NewReader(stdin), &out, &out)
 	return out.String(), code
+}
+
+func snSplit(t *testing.T, stdin string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
+	var o, e bytes.Buffer
+	code = run(context.Background(), args, strings.NewReader(stdin), &o, &e)
+	return o.String(), e.String(), code
 }
 
 // TestCLIInstallFlow drives the real installer with typed answers, as a user

@@ -29,7 +29,7 @@ func installed(u *ui, root string) (*env, error) {
 	}
 	e := openEnv(root)
 	if !e.mgr.Installed() {
-		return nil, errors.New("sneakernet is not installed here; run install.sh from the USB stick")
+		return nil, coded(exitNotInstalled, "sneakernet is not installed here; run install.sh from the USB stick")
 	}
 	return e, nil
 }
@@ -40,7 +40,7 @@ func rootFlag(fs *flag.FlagSet) *string {
 
 func newFlags(name string, u *ui) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(u.out)
+	fs.SetOutput(u.err) // flag errors are errors; "-h" is answered by run()
 	return fs
 }
 
@@ -76,6 +76,9 @@ func cmdStatus(ctx context.Context, args []string, u *ui) error {
 	if *check {
 		r := probe.Through(ctx, fmt.Sprintf("127.0.0.1:%d", st.SocksPort), "", 15*time.Second)
 		u.printf("Internet  %s\n", r)
+		if !r.OK() {
+			return &exitError{code: exitNoNet}
+		}
 	}
 	return nil
 }
@@ -113,7 +116,7 @@ func cmdSwitch(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: sneakernet switch <number|auto>")
+		return usageErr("usage: sneakernet switch <number|auto>   (see: sneakernet help switch)")
 	}
 	e, err := installed(u, *root)
 	if err != nil {
@@ -141,9 +144,6 @@ func cmdSwitch(ctx context.Context, args []string, u *ui) error {
 func cmdAdd(_ context.Context, args []string, u *ui) error {
 	fs := newFlags("add", u)
 	root := rootFlag(fs)
-	fs.Usage = func() {
-		fmt.Fprintln(u.out, "usage: sneakernet add [file...]   (links from the files, or from stdin)")
-	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,6 +153,9 @@ func cmdAdd(_ context.Context, args []string, u *ui) error {
 	}
 	var text []byte
 	if fs.NArg() == 0 {
+		if u.inTTY {
+			u.notef("Paste share links, then press Ctrl-D on an empty line.")
+		}
 		if text, err = io.ReadAll(u.in); err != nil {
 			return err
 		}
@@ -192,11 +195,11 @@ func cmdRemove(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: sneakernet remove <number>   (see: sneakernet list)")
+		return usageErr("usage: sneakernet remove <number>   (see: sneakernet list)")
 	}
 	n, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(0), "#"))
 	if err != nil {
-		return fmt.Errorf("%q is not a server number", fs.Arg(0))
+		return usageErr("%q is not a server number", fs.Arg(0))
 	}
 	e, err := installed(u, *root)
 	if err != nil {
@@ -242,7 +245,7 @@ func cmdTest(ctx context.Context, args []string, u *ui) error {
 		r := probe.Through(ctx, fmt.Sprintf("127.0.0.1:%d", st.SocksPort), *url, *timeout)
 		if !r.OK() {
 			u.fail("%s: %v", st.Describe(), r.Err)
-			return &exitError{code: 1}
+			return &exitError{code: exitNoNet}
 		}
 		u.ok("%s: %s", st.Describe(), r)
 		return nil
@@ -256,12 +259,15 @@ func cmdTest(ctx context.Context, args []string, u *ui) error {
 	if err != nil {
 		return err
 	}
-	printResults(u, servers, results)
+	if printResults(u, servers, results) == 0 {
+		return &exitError{code: exitNoNet}
+	}
 	return nil
 }
 
-// printResults lists working servers fastest first, then the failures.
-func printResults(u *ui, servers []links.Server, results map[int]probe.Result) {
+// printResults lists working servers fastest first, then the failures. It
+// returns how many work.
+func printResults(u *ui, servers []links.Server, results map[int]probe.Result) int {
 	sorted := append([]links.Server(nil), servers...)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		a, aok := results[sorted[i].Index]
@@ -289,6 +295,7 @@ func printResults(u *ui, servers []links.Server, results map[int]probe.Result) {
 		}
 	}
 	u.printf("\n%d of %d servers work right now. Use one with: sudo sneakernet switch <number>\n", working, len(results))
+	return working
 }
 
 func cmdDoctor(ctx context.Context, args []string, u *ui) error {
@@ -302,6 +309,7 @@ func cmdDoctor(ctx context.Context, args []string, u *ui) error {
 	}
 	e := openEnv(*root)
 	problems := 0
+	netDown := false
 	check := func(name string, err error) {
 		if err != nil {
 			problems++
@@ -344,10 +352,14 @@ func cmdDoctor(ctx context.Context, args []string, u *ui) error {
 		if err == nil {
 			r := probe.Through(ctx, addr, "", 15*time.Second)
 			check("internet through the proxy", r.Err)
+			netDown = r.Err != nil
 		}
 	}
-	if problems > 0 {
-		return &exitError{code: 1}
+	switch {
+	case problems == 1 && netDown: // everything else is fine; only the proxy path is not
+		return &exitError{code: exitNoNet}
+	case problems > 0:
+		return &exitError{code: exitFailed}
 	}
 	return nil
 }
@@ -420,9 +432,12 @@ func cmdTUI(ctx context.Context, args []string, u *ui) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if !u.inTTY || !u.outTTY {
+		return usageErr("the TUI needs a terminal; use the commands instead: sneakernet list | switch <number|auto> | test --all")
+	}
 	e, err := installed(u, *root)
 	if err != nil {
 		return err
 	}
-	return tui.Run(ctx, e.mgr)
+	return tui.Run(ctx, e.mgr, tui.Options{ASCII: u.ascii, NoColor: !u.color})
 }

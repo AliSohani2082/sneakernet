@@ -13,6 +13,26 @@ It works in the live session or on the system you just installed.
 
 > ⚠️ Using circumvention tools may be legally risky where you live. Use at your own risk.
 
+## Quick start
+
+Online machine: put Sneakernet on your Ventoy stick (plug it in first):
+
+```sh
+# from source (works today; needs Go 1.26+, git, curl, unzip, make)
+git clone https://github.com/AliSohani2082/sneakernet && cd sneakernet && make fetch stick
+
+# or from a published release (once one exists, see "One-liners" below)
+curl -fsSL https://raw.githubusercontent.com/AliSohani2082/sneakernet/main/scripts/install.sh | sh
+```
+
+Offline machine: boot a live ISO from the stick, open a terminal and run (one command, nothing is downloaded):
+
+```sh
+sudo sh "$(ls -d /run/media/*/Ventoy /media/*/Ventoy /mnt/ventoy 2>/dev/null | head -n1)/sneakernet/install.sh"
+```
+
+If that finds nothing, the stick is not mounted yet: see [Using the stick](#using-the-stick-end-user-offline) or `README.txt` on the stick. Then use the proxy at SOCKS5 `127.0.0.1:10808` / HTTP `127.0.0.1:10809`, and `sudo sneakernet tui` to manage servers.
+
 ## Why
 
 On a heavily filtered network, a fresh Linux install can't reach the open internet. The tools that would fix that have to be downloaded, and those downloads are blocked. Sneakernet breaks that loop by carrying everything on the stick.
@@ -38,12 +58,12 @@ On a heavily filtered network, a fresh Linux install can't reach the open intern
 - **Auto-detection** of distro, CPU architecture (amd64, arm64, 386, armv7), libc and init system.
 - **Preset servers**, with automatic failover to the fastest working one (passphrase encryption on the stick: planned).
 - **systemd service** running as an unprivileged user (system-wide proxy and TUN mode: planned).
-- **Integrity checks:** every file is checked against `SHA256SUMS` before anything is installed (signatures: planned).
+- **Integrity checks:** every file is checked against `SHA256SUMS` before anything is installed, and only the checked copies are installed or run. This catches a damaged or half-copied stick, **not a malicious one**: the checksums sit on the same stick. See [Security notes](docs/SECURITY.md); signatures are planned.
 - **Clean uninstall** from an install manifest.
 
 Supported distros: Debian, Ubuntu, Mint, Fedora, RHEL, Arch, Manjaro, CachyOS and openSUSE.
 
-## Quick start (end user, offline)
+## Using the stick (end user, offline)
 
 1. Boot a Linux ISO from the Sneakernet Ventoy stick (or use an installed system).
 2. Open a terminal and run:
@@ -70,24 +90,70 @@ Afterwards (the stick can be unplugged):
 | `sudo sneakernet doctor` | Diagnose the installation |
 | `sudo sneakernet uninstall` | Remove everything |
 
+`sneakernet help <command>` (or `<command> -h`) shows examples and flags. Unknown commands get a "did you mean" hint. Results go to stdout; progress, warnings and errors go to stderr, so `sneakernet list > servers.txt` stays clean.
+
+**Global flags** (anywhere on the line):
+
+| Flag | Effect |
+|---|---|
+| `--color auto\|always\|never`, `--no-color` | `auto` (default) colors only on a terminal, and not when `NO_COLOR` is set (any non-empty value) or `TERM=dumb`. `SNEAKERNET_COLOR` sets the default. The choice is kept when the command re-runs itself under `sudo`, which drops `NO_COLOR`. The TUI follows the same rule. |
+| `--no-input` | Never ask a question. A command that would ask fails with exit code 2 and names the flag to pass instead. Questions are also never asked when stdin is not a terminal. Use `--yes` to accept the defaults. |
+| `--ascii` | Plain ASCII symbols in the TUI (no braille, arrows, bullets or emoji; flags become `[DE]`). Chosen automatically when `TERM=linux`, the locale is not UTF-8, or `SNEAKERNET_ASCII` is set. |
+
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | success |
+| `1` | the operation failed |
+| `2` | usage error: bad flag, wrong arguments, unknown command, or a question that cannot be asked (see `--no-input`) |
+| `3` | sneakernet is not installed here |
+| `4` | root is needed and `sudo` is not available |
+| `5` | no connectivity through the proxy (`test`, `status --check`, and `doctor` when that is the only problem) |
+| `130` | interrupted (Ctrl-C) |
+
+After an install, the installer prints the same install as one command (`sudo sh …/install.sh --yes --server auto --routing …`) so the next run needs no questions.
+
 ### The search menu (`sudo sneakernet tui`)
 
 Start typing and the list filters live. Matches in the server **name** come first, then matches in other properties (protocol, transport, security, host, SNI, port, path…). Matched letters are highlighted, and small typos still match (`grmny` finds "Germany"). `field:value` narrows to one property: `sec:reality`, `proto:vless`, `port:443`, `host:example.com`, `sni:apple`.
 
 | Key | Action |
 |---|---|
-| type / `esc` | search / clear the search (`esc` again quits) |
+| `F1` or `^g` | help: every key, the search syntax and the matching commands |
+| type / `esc` | search / clear the search (`esc` again quits). While a test or switch runs, `esc` cancels it |
 | `↑` `↓` `pgup` `pgdn` | move |
 | `enter` | use the selected server |
-| `^t` | test the speed of every server in the results (one Xray process, all in parallel) |
-| `^b` | use the fastest server in the results (tests them first if needed) |
-| `^a` | auto mode: Xray keeps measuring all servers and uses the fastest |
-| `^n` | add servers: paste links, see a live preview, `^s` to save |
-| `^x` | remove the selected server (asks first) |
+| `^t` / `F5` | test the speed of every server in the results (one Xray process, all in parallel) |
+| `^b` / `F6` | use the fastest server in the results (tests them first if needed) |
+| `^a` / `F7` | auto mode: Xray keeps measuring all servers and uses the fastest |
+| `^n` / `F2` | add servers: paste links, see a live preview, `^s` to save (`esc` asks before discarding pasted links) |
+| `^x` / `F8` | remove the selected server (asks first) |
 | `^o` | sort by relevance or speed |
-| `^l` `^r` `^s` | logs · restart · start/stop |
+| `^l` / `F3`, `^r`, `^s` | logs · restart · start/stop |
+| `^c` / `F10` | quit |
+
+The F-keys are for tmux/screen, where `^b` and `^a` are the multiplexer's prefix, and for terminals where ctrl chords are taken. The bare Linux console sends `F1`–`F5` in a form the TUI does not decode, so there the key bar shows `^g` for help; the ctrl chords always work. The key bar only lists what works right now. Prefer a screen reader or plain output? Every action also has a command: `list`, `switch`, `test --all`, `add`, `remove`, `status`.
 
 With no servers yet, the TUI opens straight into the add screen. Pasting links into the search box opens it too. "Speed" is the time to fetch a small page through each server, the same "real delay" v2rayN shows.
+
+## One-liners
+
+| Goal | Command |
+|---|---|
+| Build the stick from source | `git clone https://github.com/AliSohani2082/sneakernet && cd sneakernet && make fetch stick` |
+| Release onto the stick (online) | `curl -fsSL https://raw.githubusercontent.com/AliSohani2082/sneakernet/main/scripts/install.sh \| sh` |
+| Same, a pinned release + checksum | `curl -fsSLO https://raw.githubusercontent.com/AliSohani2082/sneakernet/main/scripts/install.sh && sh install.sh --version v1.0.0 --sha256 <sha256 from the release page>` |
+| Bundle you already have onto the stick (offline) | `sh scripts/install.sh --from dist/sneakernet` or `--from sneakernet.tar.gz` |
+| Install from the stick (live ISO, offline) | `sudo sh /run/media/$USER/Ventoy/sneakernet/install.sh` |
+| Just the CLI/TUI, with Go | `go install github.com/AliSohani2082/sneakernet/cmd/sneakernet@latest` |
+| Just the CLI/TUI, with Nix | `nix run github:AliSohani2082/sneakernet` or `nix profile install github:AliSohani2082/sneakernet` |
+
+`scripts/install.sh` copies the bundle onto the stick as `<stick>/sneakernet/`. It finds a mounted stick named `Ventoy` (or takes `--to /path`), checks the archive against its `.sha256` (or your `--sha256`) and every file against `SHA256SUMS`, both before and after copying, and keeps a `servers.txt` that is already on the stick. It never uses sudo. With `--from` it does not touch the network. `sh scripts/install.sh -h` lists the options.
+
+> **Release downloads:** no release has been published yet, so the `curl … | sh` lines fail with "download failed" for now. A release must carry `sneakernet.tar.gz` and `sneakernet.tar.gz.sha256`, which `make tarball` builds. To use another mirror, set `SNEAKERNET_URL` (default `https://github.com/AliSohani2082/sneakernet/releases`). Piping into `sh` runs whatever the server sends; on a network you don't trust, download `install.sh`, read it, and pass `--sha256`.
+
+`go install` and `nix` give you only the `sneakernet` binary, without Xray or the stick bundle. That is enough for `sneakernet convert`, and for managing an existing install, but `sneakernet install` needs a bundle (`--bundle <stick>/sneakernet`). Use `make bundle` / the release tarball to build a stick.
 
 ## Building the stick (maintainer, online machine)
 
@@ -95,10 +161,27 @@ With no servers yet, the TUI opens straight into the add screen. Pasting links i
 make fetch            # download the pinned Xray releases (needs internet, once)
 cp config/servers.example.txt config/servers.txt && $EDITOR config/servers.txt
 make bundle           # → dist/sneakernet/  (~200 MB, amd64 + arm64 + 386 + armv7)
-cp -r dist/sneakernet /path/to/Ventoy/
+make stick            # bundle + copy to the mounted stick, verified (VENTOY=/path/to/Ventoy to choose)
+make tarball          # → dist/sneakernet.tar.gz + .sha256 (the release asset)
 ```
 
+`make help` lists all targets. `ARCHES="amd64"` builds a smaller bundle for one CPU. `cp -r dist/sneakernet /path/to/Ventoy/` works too; `make stick` also verifies the copy and keeps the stick's `servers.txt`.
+
 The server list ends up as `sneakernet/servers.txt` on the stick. It can be edited there directly, even from Windows; it is not covered by the checksums. It takes `vless://`, `vmess://`, `trojan://`, `ss://` and `hysteria2://` links, one per line, or a base64 subscription. Links that the pinned Xray cannot use are listed with the reason and skipped. If the list is missing or empty, the installer asks you to paste links, or to continue and add them later in the TUI. See [ventoy/README.md](ventoy/README.md) for optional persistence setup.
+
+## Nix
+
+The flake provides the `sneakernet` CLI/TUI (Linux), an app, and a dev shell with everything the Makefile needs (Go, make, curl, unzip, shellcheck…):
+
+```sh
+nix run github:AliSohani2082/sneakernet -- version     # run without installing
+nix profile install github:AliSohani2082/sneakernet    # install the CLI
+nix develop                                            # dev shell, then: make fetch bundle
+nix build && ./result/bin/sneakernet version           # build from a checkout
+nix flake check                                        # build + cmd/sneakernet tests
+```
+
+In a NixOS configuration, add the input and put `inputs.sneakernet.packages.${pkgs.stdenv.hostPlatform.system}.default` in `environment.systemPackages`. There is no NixOS module: on NixOS, the stick's installer is the wrong tool (it writes to `/opt` and `/etc`); use the `services.xray` module with the config from `sneakernet convert`. After changing `go.mod`, update `vendorHash` in `flake.nix`: set it to `lib.fakeHash`, run `nix build`, copy the hash from the error.
 
 ## Development
 
@@ -106,7 +189,7 @@ The server list ends up as `sneakernet/servers.txt` on the stick. It can be edit
 make dev-xray                 # unpack Xray for the tests (after make fetch)
 go test ./...                 # unit tests + real-Xray tests, all offline
 test/containers/run.sh        # install.sh in offline systemd containers: debian fedora arch
-make lint
+make lint                     # gofmt, go vet, sh -n, shellcheck (if installed)
 ```
 
 The tests push real traffic through generated configs to a local Xray server,
@@ -127,13 +210,15 @@ user, traffic through the proxy, switching servers and uninstall.
 | `templates/desktop/` | v2rayN launcher (M2) |
 | `ventoy/` | `ventoy.json` example + integration notes |
 | `config/` | Server list; `servers.txt` is gitignored |
-| `scripts/` | Fetch pinned deps, assemble the bundle |
+| `scripts/` | Fetch pinned deps, assemble the bundle, copy it onto a stick (`install.sh`) |
+| `flake.nix` | Nix package, app and dev shell |
 | `versions.lock` | Pinned upstream versions + checksums |
 
 ## Docs
 
 - [Product requirements (PRD)](docs/PRD.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Security notes](docs/SECURITY.md)
 
 ## Status
 

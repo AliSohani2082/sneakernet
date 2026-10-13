@@ -36,3 +36,8 @@ Everything needed is in this folder. Nothing is downloaded.
 
 Live session? Everything is gone after a reboot unless Ventoy persistence
 is set up for that ISO.
+
+About the checksums: SHA256SUMS next to these files detects a damaged or
+incomplete copy. It cannot detect a stick that someone deliberately changed,
+because the checksums are on the same stick. Only use a stick you built or
+received from a source you trust.

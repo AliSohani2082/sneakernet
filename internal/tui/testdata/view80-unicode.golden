@@ -1,0 +1,47 @@
+Sneakernet  ● active  SOCKS 127.0.0.1:PORT · HTTP 127.0.0.1:PORT
+Using no server chosen yet · routing bypass-lan
+› search: name, type, host… e.g. berlin sec:reality       4 of 4 · by relevance
+────────────────────────────────────────────────────────────────────────────────
+›     1  🇩🇪 Berlin fast         vless ws/tls                    
+      2  🇳🇱 Amsterdam           vless grpc/tls                  
+      3  Istanbul trojan        trojan raw/tls                  
+      4  a                      vmess ws/tls                    
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+de.example.com:443 · sni de.example.com · path /ws
+
+enter use • ^t test results • ^b use fastest • ^n add • esc clear/quit • F1 help
+==== F1 ====
+Sneakernet - help   any key closes this
+
+Move                                  List and screens
+  ↑            up                       ^n / F2      add
+  ↓            down                     ^x / F8      remove
+  pgup         page up                  ^l / F3      logs
+  pgdn         page down              
+  esc          clear/quit             Service and app
+                                        ^r           restart
+Servers                                 ^s           start/stop
+  enter        use                      F1 / ^g      help
+  ^t / F5      test results             ^c / F10     quit
+  ^b / F6      use fastest            
+  ^a / F7      auto                   
+  ^o           sort                   
+
+Search
+  Type to filter by name, then by type, host, SNI... Or limit it to one
+  property: proto: net: sec: host: port: sni: path: flow: fp: e.g. sec:reality
+  port:443. Paste share links anywhere to add them.
+Without the TUI
+  Every action is also a command (handy with a screen reader): sneakernet list |
+  switch <n|auto> | test --all | add | remove <n> | status

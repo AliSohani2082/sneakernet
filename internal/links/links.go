@@ -18,8 +18,10 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // Server is one parsed share link.
@@ -175,6 +177,7 @@ func Parse(link string) (Server, error) {
 		return Server{}, err
 	}
 	s.Raw = link
+	s.Name = SanitizeName(s.Name)
 	if s.Name == "" {
 		s.Name = s.Protocol + " " + net.JoinHostPort(s.Address, strconv.Itoa(s.Port))
 	}
@@ -223,7 +226,7 @@ func splitLink(link string) (linkParts, error) {
 func splitHostPort(hostport string) (string, int, error) {
 	host, portStr, err := net.SplitHostPort(hostport)
 	if err != nil {
-		return "", 0, fmt.Errorf("bad host:port %q", hostport)
+		return "", 0, errors.New("bad host:port (the link is not shown: it may hold credentials)")
 	}
 	if host == "" {
 		return "", 0, errors.New("empty server address")
@@ -599,4 +602,29 @@ func decodeBase64(s string) ([]byte, error) {
 		}
 	}
 	return nil, errors.New("invalid base64")
+}
+
+// terminalSeq matches ANSI escape sequences: CSI (ESC [ ... final byte),
+// OSC (ESC ] ... BEL or ESC \\), and other two-byte ESC sequences.
+var terminalSeq = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[ -~]?`)
+
+// SanitizeName makes a server name from an untrusted link safe to print:
+// ANSI/OSC sequences are removed, and control characters (including CR/LF),
+// bidi overrides and invalid UTF-8 are dropped. The original link stays in
+// Raw. Other text, including emoji and non-Latin scripts, is kept.
+func SanitizeName(name string) string {
+	name = strings.ToValidUTF8(name, "")
+	name = terminalSeq.ReplaceAllString(name, "")
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsControl(r):
+			return -1
+		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x200e, r == 0x200f, r == 0x061c:
+			return -1 // bidi overrides can reorder what the reader sees
+		case r == 0x2028 || r == 0x2029:
+			return -1
+		}
+		return r
+	}, name)
+	return strings.TrimSpace(name)
 }

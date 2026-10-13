@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/AliSohani2082/sneakernet/internal/fsutil"
 	"github.com/AliSohani2082/sneakernet/internal/layout"
 	"github.com/AliSohani2082/sneakernet/internal/links"
 	"github.com/AliSohani2082/sneakernet/internal/service"
@@ -63,6 +62,10 @@ type Manager struct {
 	// SkipValidate disables `xray run -test`, for targets whose Xray binary
 	// cannot run on this host (another CPU architecture).
 	SkipValidate bool
+	// XrayBin and AssetDir override the Xray used for validation. The
+	// installer sets them to its staged, checksum-verified copies so the
+	// bytes that run are the bytes that were verified.
+	XrayBin, AssetDir string
 }
 
 // Installed reports whether sneakernet is installed on the target.
@@ -110,10 +113,10 @@ func (m *Manager) SaveState(st State) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(m.T.Path(layout.EtcDir), 0o700); err != nil {
+	if err := m.T.EnsureDir(layout.EtcDir, 0o700); err != nil {
 		return err
 	}
-	return fsutil.WriteFile(m.T.Path(layout.StateFile), append(b, '\n'), 0o600)
+	return m.T.WriteFile(layout.StateFile, append(b, '\n'), 0o600)
 }
 
 // resolve finds the chosen server by key (or by Index for states saved
@@ -151,11 +154,18 @@ func (m *Manager) Apply(ctx context.Context, st State) (State, error) {
 		return st, err
 	}
 	if !m.SkipValidate {
-		if err := xrayconf.Validate(ctx, m.T.Path(layout.XrayBin), m.T.Path(layout.AssetDir), b); err != nil {
+		bin, assets := m.T.Path(layout.XrayBin), m.T.Path(layout.AssetDir)
+		if m.XrayBin != "" {
+			bin = m.XrayBin
+		}
+		if m.AssetDir != "" {
+			assets = m.AssetDir
+		}
+		if err := xrayconf.Validate(ctx, bin, assets, b); err != nil {
 			return st, err
 		}
 	}
-	if err := os.MkdirAll(m.T.Path(layout.EtcDir), 0o700); err != nil {
+	if err := m.T.EnsureDir(layout.EtcDir, 0o700); err != nil {
 		return st, err
 	}
 	// The service user reads the config through its group; without that
@@ -165,12 +175,11 @@ func (m *Manager) Apply(ctx context.Context, st State) (State, error) {
 	if gerr == nil {
 		perm = 0o640
 	}
-	cfgPath := m.T.Path(layout.ConfigFile)
-	if err := fsutil.WriteFile(cfgPath, b, perm); err != nil {
+	if err := m.T.WriteFile(layout.ConfigFile, b, perm); err != nil {
 		return st, err
 	}
 	if gerr == nil {
-		if err := service.ChownToGroup(cfgPath, gid); err != nil {
+		if err := service.ChownToGroup(m.T, layout.ConfigFile, gid); err != nil {
 			return st, err
 		}
 	}
@@ -259,10 +268,10 @@ func (m *Manager) AddLinks(text string) (AddPlan, error) {
 	for _, s := range plan.New {
 		b.WriteString(s.Raw + "\n")
 	}
-	if err := os.MkdirAll(m.T.Path(layout.EtcDir), 0o700); err != nil {
+	if err := m.T.EnsureDir(layout.EtcDir, 0o700); err != nil {
 		return plan, err
 	}
-	return plan, fsutil.WriteFile(path, b.Bytes(), 0o600)
+	return plan, m.T.WriteFile(layout.ServersFile, b.Bytes(), 0o600)
 }
 
 // RemoveServer deletes the server with the given key from the list.
@@ -299,7 +308,7 @@ func (m *Manager) RemoveServer(key string) (links.Server, error) {
 		}
 		out = append(out, l)
 	}
-	return *victim, fsutil.WriteFile(path, []byte(strings.Join(out, "")), 0o600)
+	return *victim, m.T.WriteFile(layout.ServersFile, []byte(strings.Join(out, "")), 0o600)
 }
 
 // plainList renders the current servers as one link per line.

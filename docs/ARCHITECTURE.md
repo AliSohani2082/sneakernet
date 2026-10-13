@@ -44,7 +44,7 @@ install is never touched.
 | `internal/manage` | The installed state: server list (`AddLinks`, `PlanAdd`, `Remove`), `state.json` (the chosen server by key), `Apply` (build → validate → write config), `Switch` (+ enable/restart) |
 | `internal/install` | Copy the bundle into the target, create the service user, enable the service, write the manifest; uninstall |
 | `internal/service` | systemd: install/enable/restart units, offline (`systemctl --root`) for non-running targets; the `sneakernet` user via `systemd-sysusers` |
-| `internal/bundle` | Locate the payload for this CPU and verify `SHA256SUMS` (files for other CPUs are skipped) |
+| `internal/bundle` | Locate the payload for this CPU, parse `SHA256SUMS` strictly (must list every file an install uses; no duplicates, `..`, absolute paths or symlinks) and stage the verified bytes in a private directory that the install copies from and runs Xray validation from |
 | `internal/detect` | os-release family, init system, libc, live session, architecture |
 | `internal/target` | The root to install into: the running system (`/`) or a mounted directory |
 | `internal/layout` | Every installed path, in one place |

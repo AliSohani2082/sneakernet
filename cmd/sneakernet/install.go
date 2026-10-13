@@ -47,6 +47,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 
+	u.showBanner(u.out)
 	u.printf("\n%s %s — offline Xray installer\n", u.bold("sneakernet"), version)
 
 	// 1. Bundle
@@ -59,6 +60,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if *skipVerify {
+		b.SkipVerify = true
 		u.warn("skipping the bundle checksum check")
 	} else {
 		u.step("Checking the files on the stick")
@@ -74,10 +76,12 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		return err
 	}
 	if *root == "" {
-		if f, err := os.OpenFile(layout.LogFile, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		if f, err := openLogFile(layout.LogFile); err == nil {
 			defer f.Close()
 			u.log = f
 			fmt.Fprintf(f, "\n--- sneakernet %s install, %s\n", version, time.Now().Format(time.RFC3339))
+		} else {
+			u.warn("not writing %s: %v", layout.LogFile, err)
 		}
 	}
 	host, _ := detect.ReadOS(e.t.Root)
@@ -165,8 +169,12 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 	switch {
 	case res.NoServers:
 		u.ok("installed to %s", layout.OptDir)
-		u.warn("the proxy is off until you add servers: sudo sneakernet tui")
+		u.warn("the proxy is off until you add servers: sudo %s tui", res.Command)
 		return nil
+	case res.Started && res.BootOnly:
+		u.ok("installed to %s, config checked by Xray", layout.OptDir)
+		u.ok("service %s is running", layout.UnitName)
+		u.warn("%s is read-only here (NixOS?), so the service is set up for this boot only", layout.UnitDir)
 	case res.Started:
 		u.ok("installed to %s, config checked by Xray", layout.OptDir)
 		u.ok("service %s is running and starts at boot", layout.UnitName)
@@ -183,7 +191,7 @@ func cmdInstall(ctx context.Context, args []string, u *ui) error {
 		u.step("Testing the connection")
 		connected = checkConnection(ctx, u, res.State)
 	}
-	printSummary(u, res.State, connected, live)
+	printSummary(u, res.State, res.Command, connected, live)
 	return nil
 }
 
@@ -459,11 +467,11 @@ func checkConnection(ctx context.Context, u *ui, st manage.State) bool {
 		}
 	}
 	u.warn("no connection through the proxy yet: %v", r.Err)
-	u.printf("     %s\n", u.dim("try another server:  sudo sneakernet tui   (press T to test them all)"))
+	u.notef("     try another server:  sudo sneakernet tui   (press ^t to test them all)")
 	return false
 }
 
-func printSummary(u *ui, st manage.State, connected, live bool) {
+func printSummary(u *ui, st manage.State, command string, connected, live bool) {
 	w := u.out
 	fmt.Fprintln(w)
 	if connected {
@@ -478,8 +486,9 @@ func printSummary(u *ui, st manage.State, connected, live bool) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "  Use it in a terminal:")
 	writeProxyExports(w, st)
-	fmt.Fprintln(w, "  Manage it:      sudo sneakernet tui")
-	fmt.Fprintln(w, "                  sneakernet status | switch | test | uninstall")
+	fmt.Fprintf(w, "  Manage it:      sudo %s tui\n", command)
+	fmt.Fprintf(w, "                  %s status | switch | test | uninstall\n", command)
+	u.printf("\n  Next time, skip the questions:\n    %s\n", reinstallCommand(u.args, st))
 	if live {
 		fmt.Fprintln(w, "\n  Live session: this is gone after a reboot unless Ventoy persistence is set up.")
 	}

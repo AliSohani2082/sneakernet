@@ -3,6 +3,7 @@
 #
 #   test/containers/run.sh                 # debian fedora arch
 #   test/containers/run.sh debian          # just one
+#   test/containers/run.sh debian-ro       # with a read-only /etc/systemd/system (as on NixOS)
 #
 # For each distro: boot systemd with networking disabled (--network=none),
 # mount the bundle read-only and noexec (like the exFAT stick), run the real
@@ -50,9 +51,13 @@ cat > "$WORK/server.json" <<EOF
 EOF
 
 run_distro() {
-  local d=$1 img=${IMAGE[$1]:-} name="sneakernet-test-$1" tag="localhost/sneakernet-test:$1"
+  # "<distro>-ro" runs <distro> with /etc/systemd/system and /etc/sysusers.d
+  # read-only, the way NixOS keeps them in the Nix store.
+  local d=$1 ro="" name="sneakernet-test-$1"
+  [[ $d == *-ro ]] && { ro=1; d=${d%-ro}; }
+  local img=${IMAGE[$d]:-} tag="localhost/sneakernet-test:$d"
   [ -n "$img" ] || { fail "$d: unknown distro"; return; }
-  say "$d ($img)"
+  say "$1 ($img)"
   if ! podman image exists "$tag"; then
     podman build -q -t "$tag" --build-arg BASE="$img" -f "$ROOT/test/containers/Containerfile" \
       "$ROOT/test/containers" >/dev/null || { fail "$d: image build"; return; }
@@ -79,15 +84,31 @@ run_distro() {
     /bin/sh -c 'cp /media/Ventoy/sneakernet/bin/amd64/xray /run/xray-server && exec /run/xray-server run -c /etc/test-server.json'
   sleep 1
 
+  if [[ -n $ro ]]; then
+    x sh -c 'mkdir -p /etc/sysusers.d && for d in /etc/systemd/system /etc/sysusers.d; do
+      mount --bind $d $d && mount -o remount,ro,bind $d; done' || { fail "$1: read-only mounts"; return; }
+  fi
+
   local out
   if out=$(x sh /media/Ventoy/sneakernet/install.sh --yes --server 1 --routing bypass-lan 2>&1); then
     pass "install.sh from a read-only noexec stick"
   else
     fail "install.sh"; echo "$out" | sed 's/^/      /'; podman rm -f "$name" >/dev/null; return
   fi
+  if [[ -n $ro ]]; then
+    x test -f /run/systemd/system/sneakernet-xray.service && x test -f /run/sysusers.d/sneakernet.conf &&
+      [[ $out == *"for this boot only"* ]] &&
+      pass "read-only /etc: unit and user entry went to /run, boot-only warning shown" ||
+      { fail "read-only fallback"; echo "$out" | sed 's/^/      /'; }
+  fi
   [[ $(x systemctl is-active sneakernet-xray) == active ]] && pass "service active" || {
     fail "service active"; x journalctl -u sneakernet-xray --no-pager -n 20 | sed 's/^/      /'; }
-  [[ $(x systemctl is-enabled sneakernet-xray) == enabled ]] && pass "service enabled at boot" || fail "service enabled"
+  if [[ -n $ro ]]; then
+    [[ $(x systemctl is-enabled sneakernet-xray) == enabled-runtime ]] && pass "service enabled for this boot" ||
+      fail "service enabled-runtime: $(x systemctl is-enabled sneakernet-xray)"
+  else
+    [[ $(x systemctl is-enabled sneakernet-xray) == enabled ]] && pass "service enabled at boot" || fail "service enabled"
+  fi
   local pid user
   pid=$(x systemctl show -p MainPID --value sneakernet-xray)
   user=$(x ps -o user= -p "$pid" 2>/dev/null | tr -d ' ')
@@ -114,6 +135,7 @@ run_distro() {
 
   out=$(x sneakernet uninstall --yes 2>&1)
   if [[ $out == *removed* ]] && ! x test -e /opt/sneakernet && ! x test -e /etc/systemd/system/sneakernet-xray.service \
+     && ! x test -e /run/systemd/system/sneakernet-xray.service \
      && ! x systemctl is-active -q sneakernet-xray && ! x id sneakernet >/dev/null 2>&1; then
     pass "uninstall removes everything"
   else
