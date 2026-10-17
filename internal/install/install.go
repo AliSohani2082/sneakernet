@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -139,14 +140,23 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 
 	res := &Result{State: o.State, Command: layout.SelfBin}
 	osInfo, _ := detect.ReadOS(t.Root)
+	// Links from an earlier install stay owned by this one, so uninstall
+	// finds them even when this run picks a different directory.
+	m.Links = previousLinks(t)
 	if dir, onPath := commandDir(t, osInfo.Family); dir != "" {
 		link := filepath.Join(dir, layout.CommandName)
 		if err := linkCommand(t, link); err != nil {
 			log("note: could not create %s: %v", link, err)
 		} else {
-			m.Links = append(m.Links, link)
+			if !slices.Contains(m.Links, link) {
+				m.Links = append(m.Links, link)
+			}
 			if onPath {
 				res.Command = layout.CommandName
+			}
+			// Record the link now: a later failure must not orphan it.
+			if err := writeManifest(t, m); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -198,14 +208,34 @@ func Install(ctx context.Context, o Options) (*Result, error) {
 	}
 
 	res.Manifest = m
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := t.WriteFile(layout.ManifestFile, append(b, '\n'), 0o644); err != nil {
+	if err := writeManifest(t, m); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+func writeManifest(t target.Target, m Manifest) error {
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return t.WriteFile(layout.ManifestFile, append(b, '\n'), 0o644)
+}
+
+// previousLinks returns the command links a former install recorded that
+// still point at our binary.
+func previousLinks(t target.Target) []string {
+	var old Manifest
+	if b, err := t.ReadFile(layout.ManifestFile); err != nil || json.Unmarshal(b, &old) != nil {
+		return nil
+	}
+	var kept []string
+	for _, l := range old.Links {
+		if dst, err := t.Readlink(l); err == nil && dst == layout.SelfBin {
+			kept = append(kept, l)
+		}
+	}
+	return kept
 }
 
 func countUsable(servers []links.Server) int {
@@ -279,13 +309,16 @@ func writableDir(dir string) bool {
 	return syscall.Access(real, 2 /* W_OK */) == nil
 }
 
-// linkCommand links `sneakernet` at link without clobbering a file we did
-// not create.
+// linkCommand links `sneakernet` at link without clobbering a file or a
+// link we did not create.
 func linkCommand(t target.Target, link string) error {
 	path := link
 	if fi, err := t.Lstat(link); err == nil {
 		if fi.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("%s exists and is not a symlink", path)
+		}
+		if dst, err := t.Readlink(link); err != nil || dst != layout.SelfBin {
+			return fmt.Errorf("%s is a link to something else (%s)", path, dst)
 		}
 		if err := t.Remove(link); err != nil {
 			return err

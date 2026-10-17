@@ -94,7 +94,8 @@ fi
 [ -w "$to" ] || die "cannot write to $to. Remount it as your user; this script does not use sudo"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/sneakernet-get.XXXXXX")
-stage="$to/.sneakernet.new"
+# A private staging folder per run, so two runs never share (or delete) one.
+stage=$(mktemp -d "$to/.sneakernet.new.XXXXXX") || die "cannot create a staging folder on $to"
 old="$to/.sneakernet.old"
 trap 'rm -rf "$work" "$stage"' EXIT
 trap 'exit 130' INT TERM
@@ -140,16 +141,24 @@ else
     src="$work/sneakernet"
 fi
 
+# Symlinks have no place in a bundle: they could point at host files.
+nolinks() { [ -z "$(find "$1" -type l 2>/dev/null | head -n 1)" ]; }
+nolinks "$src" || die "$src contains symlinks; refusing to copy it"
 verify_bundle "$src" || die "$src is damaged; rebuild or download it again"
 
 # Copy to a temp folder on the stick, check the copy, then swap it in.
 say "copy to $to/sneakernet"
-rm -rf "$stage"
-cp -R "$src" "$stage"
+cp -R "$src/." "$stage/"
+chmod 755 "$stage"
+nolinks "$stage" || die "the copy on the stick contains symlinks; refusing to install it"
 verify_bundle "$stage" || die "the copy on the stick does not match. The stick may be failing; try another one"
 # A run interrupted mid-swap leaves the previous install in $old: put it back.
 if [ ! -e "$to/sneakernet" ] && [ -e "$old" ]; then mv "$old" "$to/sneakernet"; fi
-if [ -f "$to/sneakernet/servers.txt" ]; then
+# Keep servers.txt only if it is a plain file, never a link to somewhere else.
+if [ -L "$to/sneakernet/servers.txt" ]; then
+    say "note: servers.txt on the stick is a symlink; not kept"
+elif [ -f "$to/sneakernet/servers.txt" ]; then
+    rm -f "$stage/servers.txt"
     cp "$to/sneakernet/servers.txt" "$stage/servers.txt"
     say "kept your servers.txt"
 fi
@@ -157,7 +166,11 @@ fi
 # never leaves the stick without a copy (and without the user's servers.txt).
 rm -rf "$old"
 if [ -e "$to/sneakernet" ]; then mv "$to/sneakernet" "$old"; fi
-mv "$stage" "$to/sneakernet"
+if ! mv "$stage" "$to/sneakernet"; then
+    # Put the previous install back before giving up.
+    if [ -e "$old" ] && [ ! -e "$to/sneakernet" ]; then mv "$old" "$to/sneakernet"; fi
+    die "could not move the new copy into place; the previous install was restored"
+fi
 rm -rf "$old"
 sync
 
